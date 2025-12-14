@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# အရောင်များnaing
+# အရောင်များ
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 CYAN='\033[0;36m'
@@ -35,7 +35,7 @@ read -p "2. Wave Phone Number: " WAVE_NUM
 read -p "   Wave Account Name: " WAVE_NAME
 
 # Set payment variables for bot.js
-# ❌ Copy Button ဖြုတ်ရန်အတွက် ဖုန်းနံပါတ်ကို Markdown code block ဖြင့် ပြသပါမည်။
+# [FIXED]: Markdown Code Block များကို Bash Variable တွင် တွဲထည့်လိုက်သည်။
 KPAY_INFO_TEXT="1️⃣ Kpay: \`${KPAY_NUM}\` ($KPAY_NAME)"
 WAVE_INFO_TEXT="2️⃣ Wave: \`${WAVE_NUM}\` ($WAVE_NAME)"
 KPAY_COPY_DATA="$KPAY_NUM"
@@ -177,7 +177,7 @@ function getProgressBar(used, total) {
 function sanitizeText(text) {
     // Escape all potential Markdown V1 special characters: _ * ` [ ] ( ) ~ > # + - = | { } . !
     if (!text) return '';
-    return text.replace(/([_*\[\]()~`>#+\-=|{}.!])/g, '\\$1');
+    return text.replace(/([_*\[\]()~>#+\-=|{}.!])/g, '\\$1');
 }
 
 // ================================================================
@@ -195,7 +195,6 @@ function getPaymentOptions() {
         parse_mode: 'Markdown',
         reply_markup: {
              // Inline Keyboard ကို လုံးဝ ဖယ်ရှားလိုက်သည်
-             // ဤနေရာတွင် User သည် Markdown Code Block (`) အတွင်းရှိ နံပါတ်ကို ဖိ၍ copy ကူးရပါမည်။
         }
     };
 }
@@ -260,7 +259,7 @@ bot.onText(/\/admin/, (msg) => {
 bot.onText(/^(🆓 အစမ်း Key \(1GB\)\(1Day\))$/, async (msg) => {
     const chatId = msg.chat.id;
     const userFullName = `${msg.from.first_name} ${msg.from.last_name || ''}`.trim();
-    // 🔔 Username ကို ဖယ်ရှားလိုက်ပြီ
+    // Username ကို Key Name မှ လုံးဝ ဖယ်ရှားသည်
 
     if (claimedUsers.includes(chatId)) { 
         return bot.sendMessage(chatId, "⚠️ **Sorry!**\nမိတ်ဆွေ Test Key ထုတ်ယူပြီးသား ဖြစ်ပါသည်။\nPremium Plan ကို ဝယ်ယူအသုံးပြုပေးပါ။", { parse_mode: 'Markdown' }); 
@@ -269,7 +268,7 @@ bot.onText(/^(🆓 အစမ်း Key \(1GB\)\(1Day\))$/, async (msg) => {
     bot.sendMessage(chatId, "⏳ Creating Test Key...");
     try {
         const expireDate = getMyanmarDate(TEST_PLAN.days); 
-        // 🔑 Key Name အသစ်: Full Name သက်သက်သာ ထားရှိ
+        // 🔑 Key Name: Full Name သက်သက် + Expire Date
         const name = `TEST_${userFullName.replace(/\|/g, '').trim()} | ${expireDate}`; 
         const limit = TEST_PLAN.gb * 1024 * 1024 * 1024;
         const res = await client.post(`${OUTLINE_API_URL}/access-keys`);
@@ -290,7 +289,7 @@ bot.onText(/^(🛒 VPN Key ဝယ်ရန်)$/, (msg) => {
 bot.onText(/^(🔑 VPN KEY ပြရန်)$/, async (msg) => { 
     const userFullName = `${msg.from.first_name} ${msg.from.last_name || ''}`.trim();
     bot.sendMessage(msg.chat.id, "🔎 Retrieving Key URL...");
-    await retrieveKeyUrlOnly(msg.chat.id, userFullName); // Username parameter ကို ဖယ်လိုက်သည်
+    await retrieveKeyUrlOnly(msg.chat.id, userFullName); 
 });
 
 // 4. Detailed Status ပြရန် (👤 Package စစ်ရန်)
@@ -314,8 +313,7 @@ bot.on('callback_query', async (callbackQuery) => {
     const data = callbackQuery.data;
     const userFullName = `${callbackQuery.from.first_name} ${callbackQuery.from.last_name || ''}`.trim();
     
-    // Copy Command Handler ကို ဖြုတ်လိုက်ပြီ (Inline Copy Button မရှိတော့ပါ)
-    // if (data.startsWith('copy_')) { ... return; }
+    // Copy Command Handler ကို ဖယ်ရှားလိုက်သည်
 
     if (data === 'check_status') { bot.sendMessage(chatId, "🔎 Checking..."); await checkUserStatus(chatId, userFullName); } 
     
@@ -500,7 +498,7 @@ ${getProgressBar(used, limit)}
 async function createKeyForUser(userId, plan, userName) {
     try {
         const expireDate = getMyanmarDate(plan.days); 
-        // 🔑 Key Name အသစ်: Full Name သက်သက် + Expire Date
+        // 🔑 Key Name: Full Name သက်သက် + Expire Date
         const name = `${userName.replace(/\|/g, '').trim()} | ${expireDate}`; 
         const limit = plan.gb * 1024 * 1024 * 1024;
         const res = await client.post(`${OUTLINE_API_URL}/access-keys`);
@@ -514,7 +512,7 @@ async function renewKeyForUser(keyId, plan, userName) {
     try {
         const expireDate = getMyanmarDate(plan.days); 
         const cleanName = userName.replace('TEST_', '').replace(/\|/g, '').trim();
-        // 🔑 Key Name အသစ်: Full Name သက်သက် + Expire Date
+        // 🔑 Key Name: Full Name သက်သက် + Expire Date
         const name = `${cleanName} | ${expireDate}`;
         const limit = plan.gb * 1024 * 1024 * 1024;
         await client.put(`${OUTLINE_API_URL}/access-keys/${keyId}/name`, { name });
@@ -649,6 +647,7 @@ CLEAN_USERNAME=${ADMIN_USERNAME//@/}
 sed -i "s|REPLACE_ADMIN_USER|$CLEAN_USERNAME|g" bot.js
 
 # Replace Payment Config
+# [FIXED] Bash variables များကို ထည့်သွင်းသည်။ Markdown Code Block ကို `...` အတွင်း သတ်မှတ်ထားသောကြောင့် Node.js Syntax error မဖြစ်တော့ပါ။
 sed -i "s|REPLACE_KPAY_INFO_TEXT|$KPAY_INFO_TEXT|g" bot.js
 sed -i "s|REPLACE_WAVE_INFO_TEXT|$WAVE_INFO_TEXT|g" bot.js
 sed -i "s|REPLACE_KPAY_NUM_FOR_COPY|$KPAY_COPY_DATA|g" bot.js
@@ -673,8 +672,5 @@ pm2 startup
 echo -e "\n${GREEN}✅ INSTALLATION SUCCESSFUL!${NC}"
 echo -e "${YELLOW}Your VPN Shop Bot is running with Myanmar Time!${NC}"
 echo -e "${CYAN}------------------------------------------------${NC}"
-echo -e "Menu ပြောင်းလဲမှုများ:"
-echo -e "1. Key Name တွင် ${YELLOW}Telegram Full Name သက်သက်သာ${NC} ပါဝင်ပါမည်။"
-echo -e "2. ငွေပေးချေမှုနံပါတ်များကို ${YELLOW}ဖိနှိပ်၍ Copy ကူးနိုင်ပါမည်${NC} (Copy ခလုတ် ဖယ်ရှားပြီး)"
-echo -e "3. Menu ကို ${YELLOW}🔑 VPN KEY ပြရန်${NC} နှင့် ${YELLOW}👤 Package စစ်ရန်${NC} ဟု ရှင်းလင်းစွာ ခွဲထားပါသည်။"
+echo -e "Fix: Syntax Error ကို ဖြေရှင်းပြီး Key Name နှင့် Copy Feature များကို ပြင်ဆင်ထားပါသည်။"
 echo -e "${CYAN}------------------------------------------------${NC}"
