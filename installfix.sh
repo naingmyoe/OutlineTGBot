@@ -35,9 +35,9 @@ read -p "2. Wave Phone Number: " WAVE_NUM
 read -p "   Wave Account Name: " WAVE_NAME
 
 # Set payment variables for bot.js
-# [FIXED]: Phone Number ကို သီးခြားလိုင်းတွင် Code Block ဖြင့် ပြသရန် ပြင်ဆင်သည်။
-KPAY_INFO_TEXT="1️⃣ Kpay Account Name: **$KPAY_NAME**\nဖုန်းနံပါတ်: \`${KPAY_NUM}\`"
-WAVE_INFO_TEXT="2️⃣ WavePay Account Name: **$WAVE_NAME**\nဖုန်းနံပါတ်: \`${WAVE_NUM}\`"
+# Markdown Code Block များကို Bash Variable တွင် တွဲထည့်သည်။
+KPAY_INFO_TEXT="1️⃣ Kpay: \`${KPAY_NUM}\` ($KPAY_NAME)"
+WAVE_INFO_TEXT="2️⃣ Wave: \`${WAVE_NUM}\` ($WAVE_NAME)"
 KPAY_COPY_DATA="$KPAY_NUM"
 WAVE_COPY_DATA="$WAVE_NUM"
 
@@ -80,6 +80,7 @@ curl -fsSL https://deb.nodesource.com/setup_18.x | sudo -E bash -
 apt install -y nodejs
 
 echo -e "${YELLOW}📁 Setting up Project Folder...${NC}"
+# ယခင် Error များ ရှောင်ရှားရန် Folder ကို ရှင်းလင်းပြီး ပြန်ဖန်တီးပါသည်
 rm -rf /root/vpn-shop
 mkdir -p /root/vpn-shop
 cd /root/vpn-shop
@@ -257,6 +258,7 @@ bot.onText(/\/admin/, (msg) => {
 bot.onText(/^(🆓 အစမ်း Key \(1GB\)\(1Day\))$/, async (msg) => {
     const chatId = msg.chat.id;
     const userFullName = `${msg.from.first_name} ${msg.from.last_name || ''}`.trim();
+    // #Username ကို ဖယ်ရှားလိုက်ပြီ
 
     if (claimedUsers.includes(chatId)) { 
         return bot.sendMessage(chatId, "⚠️ **Sorry!**\nမိတ်ဆွေ Test Key ထုတ်ယူပြီးသား ဖြစ်ပါသည်။\nPremium Plan ကို ဝယ်ယူအသုံးပြုပေးပါ။", { parse_mode: 'Markdown' }); 
@@ -534,11 +536,7 @@ async function sendUserList(chatId) {
         let inlineKeyboard = [];
 
         res.data.accessKeys.forEach(k => { 
-            let keyName = k.name;
-            // Admin list တွင်ပြရန် Key Name မှ #username များကို ဖယ်ရှားသည်
-            keyName = keyName.replace(/#\w+/g, '').trim();
-            const safeName = sanitizeText(keyName);
-            
+            const safeName = sanitizeText(k.name);
             message += `🆔 \`${k.id}\` : ${safeName}\n`;
             inlineKeyboard.push([{ text: `[${k.id}] ${safeName}`.substring(0, 40), callback_data: `admin_check_id_${k.id}` }, { text: "🔎 Check", callback_data: `admin_check_id_${k.id}` }]);
         });
@@ -680,7 +678,6 @@ pm2 startup
 echo -e "\n${GREEN}✅ INSTALLATION SUCCESSFUL!${NC}"
 echo -e "${YELLOW}Your VPN Shop Bot is running with Myanmar Time!${NC}"
 echo -e "${CYAN}------------------------------------------------${NC}"
-echo -e "Key Name: Key များသည် ${YELLOW}Telegram Full Name သက်သက်${NC} ဖြင့်သာ ဖန်တီးပါမည်။"
-echo -e "Copy Fix: ငွေပေးချေမှုနံပါတ်များကို ${YELLOW}ဖိနှိပ်၍ နံပါတ်သက်သက်${NC} ကူးယူနိုင်ရန် ပြင်ဆင်ထားပါသည်။"
+echo -e "Key Name Fix: Key များသည် ${YELLOW}Telegram Full Name သက်သက်${NC} ဖြင့်သာ ဖန်တီးပါမည်။"
 echo -e "Bot Status: Log များကို ချက်ချင်းစစ်ဆေးရန် ${YELLOW}pm2 logs vpn-shop${NC} ကို အသုံးပြုပါ။"
 echo -e "${CYAN}------------------------------------------------${NC}"
