@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# အရောင်များ
+# အရောင်များok
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 CYAN='\033[0;36m'
@@ -106,9 +106,7 @@ const PAYMENT_INFO = `
 1️⃣ Kpay: \`REPLACE_KPAY_NUM\` (REPLACE_KPAY_NAME)
 2️⃣ Wave: \`REPLACE_WAVE_NUM\` (REPLACE_WAVE_NAME)
 
-⚠️ ငွေလွှဲပြီးပါက ပြေစာ (Screenshot) ပို့ပေးပါ။ 
-၁၀ မိနစ်အတွင်း Order Confirm မဖြစ်ပါက 
-09660983760 ကိုဆက်သွယ်နိုင်ပါသည်။
+⚠️ ငွေလွှဲပြီးပါက ပြေစာ (Screenshot) ပို့ပေးပါ။
 `;
 
 const CHECK_INTERVAL = 10000; 
@@ -171,7 +169,7 @@ const mainMenuKeyboard = {
         keyboard: [
             // Menu နေရာချိန်းခြင်း: Free Trial (1st), ဝယ်ရန် (2nd), Key ကြည့်ရန် (3rd)
             [{ text: "🆓 အစမ်း Key (1GB)(1Day)" }, { text: "🛒 VPN Key ဝယ်ရန်" }, { text: "🔑 မိမိ VPN Key ကြည့်ရန်" }], 
-            // 🌟 Package စစ်ရန်, Admin Panel (Admin အတွက်), ဆက်သွယ်ရန်
+            // 🌟 Package စစ်ရန်, ဆက်သွယ်ရန် (Admin Panel မပါ)
             [{ text: "👤 Package စစ်ရန်" }, { text: "🆘 ဆက်သွယ်ရန်" }] 
         ],
         resize_keyboard: true,
@@ -179,12 +177,12 @@ const mainMenuKeyboard = {
     }
 };
 
-// Admin အတွက်သာ Menu ချိန်ညှိခြင်း
+// Admin အတွက် Menu ချိန်ညှိခြင်း
 const adminKeyboard = {
     reply_markup: {
         keyboard: [
             [{ text: "🆓 အစမ်း Key (1GB)(1Day)" }, { text: "🛒 VPN Key ဝယ်ရန်" }, { text: "🔑 မိမိ VPN Key ကြည့်ရန်" }], 
-            // 🌟 ဤနေရာတွင် Admin Panel ကို Package စစ်ရန် ပြီးနောက် ထည့်သွင်းသည်။
+            // 🌟 Admin Panel ကို Package စစ်ရန် နှင့် ဆက်သွယ်ရန် ကြားတွင် ထည့်သွင်းသည်။
             [{ text: "👤 Package စစ်ရန်" }, { text: "👮‍♂️ Admin Panel" }, { text: "🆘 ဆက်သွယ်ရန်" }]
         ],
         resize_keyboard: true,
@@ -242,19 +240,13 @@ bot.onText(/^(👮‍♂️ Admin Panel)$/, (msg) => {
 
 // --- MENU BUTTON LOGIC MAPPING ---
 
-// 1. SHOW MY KEY 
-bot.onText(/^(🔑 မိမိ VPN Key ကြည့်ရန်)$/, async (msg) => {
-    const userFullName = `${msg.from.first_name} ${msg.from.last_name || ''}`.trim();
-    bot.sendMessage(msg.chat.id, "🔎 Searching for your Key...");
-    await showMyKey(msg.chat.id, userFullName); 
-});
-
-// 2. FREE TEST KEY
+// 1. FREE TEST KEY
 bot.onText(/^(🆓 အစမ်း Key \(1GB\)\(1Day\))$/, async (msg) => {
     const chatId = msg.chat.id;
     // Full Name နှင့် Username ကို ရယူ
     const userFullName = `${msg.from.first_name} ${msg.from.last_name || ''}`.trim();
     const username = msg.from.username ? `@${msg.from.username}` : '';
+    const nameWithUsername = `${userFullName} ${username}`.trim();
 
     if (claimedUsers.includes(chatId)) { 
         return bot.sendMessage(chatId, "⚠️ **Sorry!**\nမိတ်ဆွေ Test Key ထုတ်ယူပြီးသား ဖြစ်ပါသည်။\nPremium Plan ကို ဝယ်ယူအသုံးပြုပေးပါ။", { parse_mode: 'Markdown' }); 
@@ -263,29 +255,39 @@ bot.onText(/^(🆓 အစမ်း Key \(1GB\)\(1Day\))$/, async (msg) => {
     bot.sendMessage(chatId, "⏳ Creating Test Key...");
     try {
         const expireDate = getMyanmarDate(TEST_PLAN.days); // Use MM Time
-        // Key Name: Full Name + Username + Date
-        const name = `TEST_${userFullName.replace(/\|/g, '').trim()} ${username} | ${expireDate}`; 
+        // Key Name: [USER_ID] | Name | Date
+        const name = `[${chatId}] | TEST_${nameWithUsername.replace(/\|/g, '').trim()} | ${expireDate}`; // 🌟 Key Name တွင် User ID ထည့်သွင်းလိုက်ပြီ
         const limit = TEST_PLAN.gb * 1024 * 1024 * 1024;
         const res = await client.post(`${OUTLINE_API_URL}/access-keys`);
         await client.put(`${OUTLINE_API_URL}/access-keys/${res.data.id}/name`, { name });
         await client.put(`${OUTLINE_API_URL}/access-keys/${res.data.id}/data-limit`, { limit: { bytes: limit } });
         claimedUsers.push(chatId); fs.writeFileSync(CLAIM_FILE, JSON.stringify(claimedUsers));
-        bot.sendMessage(chatId, `🎉 **Free Trial Created!**\n\n👤 Name: ${userFullName} ${username}\n📦 Limit: 1 GB\n📅 Expire: 1 Day\n\n🔗 **Key:**\n\`${res.data.accessUrl}\``, { parse_mode: 'Markdown' });
+        bot.sendMessage(chatId, `🎉 **Free Trial Created!**\n\n👤 Name: ${nameWithUsername}\n📦 Limit: 1 GB\n📅 Expire: 1 Day\n\n🔗 **Key:**\n\`${res.data.accessUrl}\``, { parse_mode: 'Markdown' });
     } catch (e) { bot.sendMessage(chatId, "❌ Error creating test key."); }
 });
 
-// 3. BUY PREMIUM KEY
+// 2. BUY PREMIUM KEY
 bot.onText(/^(🛒 VPN Key ဝယ်ရန်)$/, (msg) => {
     const keyboard = Object.keys(PLANS).map(key => [{ text: `${PLANS[key].name} - ${PLANS[key].price}`, callback_data: `select_${key}_NEW_0` }]);
     bot.sendMessage(msg.chat.id, "📅 **မိမိဝယ်ယူလိုသော Plan ကို ရွေးချယ်ပါ:**", { parse_mode: 'Markdown', reply_markup: { inline_keyboard: keyboard } });
 });
 
+// 3. SHOW MY KEY 
+bot.onText(/^(🔑 မိမိ VPN Key ကြည့်ရန်)$/, async (msg) => {
+    const chatId = msg.chat.id;
+    // Key ကို User ID ဖြင့် ရှာဖွေမည်
+    const userFullName = `${msg.from.first_name} ${msg.from.last_name || ''}`.trim();
+    bot.sendMessage(chatId, "🔎 Searching for your Key...");
+    await showMyKey(chatId, userFullName); 
+});
+
 // 4. MY ACCOUNT (Package စစ်ရန်)
 bot.onText(/^(👤 Package စစ်ရန်)$/, async (msg) => {
+    const chatId = msg.chat.id;
     // Full Name ကို ရယူပြီး စစ်ဆေး
     const userFullName = `${msg.from.first_name} ${msg.from.last_name || ''}`.trim();
-    bot.sendMessage(msg.chat.id, "🔎 Checking Account Status...");
-    await checkUserStatus(msg.chat.id, userFullName); 
+    bot.sendMessage(chatId, "🔎 Checking Account Status...");
+    await checkUserStatus(chatId, userFullName); 
 });
 
 // 5. CONTACT ADMIN
@@ -307,12 +309,12 @@ bot.on('callback_query', async (callbackQuery) => {
 
     // (Inline button version of Test Key)
     if (data === 'get_test_key') {
+        // ... (This logic is usually linked to the Free Trial button, so it remains the same)
         if (claimedUsers.includes(chatId)) { return bot.sendMessage(chatId, "⚠️ **Sorry!**\nမိတ်ဆွေ Test Key ထုတ်ယူပြီးသား ဖြစ်ပါသည်။"); }
         bot.sendMessage(chatId, "⏳ Creating Test Key...");
         try {
-            const expireDate = getMyanmarDate(TEST_PLAN.days); // Use MM Time
-            // Key Name: Full Name + Username + Date
-            const name = `TEST_${nameWithUsername.replace(/\|/g, '').trim()} | ${expireDate}`; 
+            const expireDate = getMyanmarDate(TEST_PLAN.days); 
+            const name = `[${chatId}] | TEST_${nameWithUsername.replace(/\|/g, '').trim()} | ${expireDate}`; // 🌟 User ID ထည့်သွင်း
             const limit = TEST_PLAN.gb * 1024 * 1024 * 1024;
             const res = await client.post(`${OUTLINE_API_URL}/access-keys`);
             await client.put(`${OUTLINE_API_URL}/access-keys/${res.data.id}/name`, { name });
@@ -329,8 +331,10 @@ bot.on('callback_query', async (callbackQuery) => {
         const realPlanKey = data.match(/plan_\d+/)[0]; 
         const realType = data.includes('RENEW') ? 'RENEW' : 'NEW';
         const realKeyId = data.split('_').pop();
-        // userStates တွင် Name (with Username) ကို သုံးရန် ပြင်ဆင်
-        userStates[chatId] = { status: 'WAITING_SLIP', plan: PLANS[realPlanKey], name: nameWithUsername, type: realType, renewKeyId: realKeyId }; 
+        
+        // 🌟 Name တွင် User ID ကို ထည့်သွင်း
+        const newKeyName = `[${chatId}] | ${nameWithUsername}`;
+        userStates[chatId] = { status: 'WAITING_SLIP', plan: PLANS[realPlanKey], name: newKeyName, type: realType, renewKeyId: realKeyId }; 
         bot.sendMessage(chatId, `✅ **Selected:** ${PLANS[realPlanKey].name}\n💰 **Price:** ${PLANS[realPlanKey].price}\n\n${PAYMENT_INFO}`, { parse_mode: 'Markdown' });
     }
 
@@ -348,10 +352,13 @@ bot.on('callback_query', async (callbackQuery) => {
                 const { plan, name, type, renewKeyId } = userStates[buyerId];
                 bot.editMessageCaption("✅ Approved", { chat_id: ADMIN_ID, message_id: msg.message_id });
                 let resultKey;
-                if (type === 'RENEW') resultKey = await renewKeyForUser(renewKeyId, plan, name);
+                
+                // 🌟 Key Create/Renew တွင် User ID (buyerId) ကို ထည့်ပေးခြင်း
+                if (type === 'RENEW') resultKey = await renewKeyForUser(renewKeyId, plan, name, buyerId);
                 else resultKey = await createKeyForUser(buyerId, plan, name);
+
                 if (resultKey) {
-                    bot.sendMessage(buyerId, `🎉 **Success!**\n\n👤 Name: ${name}\n📅 Expire: ${resultKey.expireDate}\n\n🔗 **Key:**\n\`${resultKey.accessUrl}\``, { parse_mode: 'Markdown' });
+                    bot.sendMessage(buyerId, `🎉 **Success!**\n\n👤 Name: ${name.replace(`[${buyerId}] | `, '')}\n📅 Expire: ${resultKey.expireDate}\n\n🔗 **Key:**\n\`${resultKey.accessUrl}\``, { parse_mode: 'Markdown' });
                     delete userStates[buyerId];
                 }
             }
@@ -371,6 +378,8 @@ bot.on('photo', async (msg) => {
     if (userStates[chatId] && userStates[chatId].status === 'WAITING_SLIP') {
         const { plan, name, type } = userStates[chatId];
         bot.sendMessage(chatId, "📩 Slip Received.");
+        
+        // 🌟 Admin ကို ပို့သည့် Message တွင် Key Name အပြည့်အစုံကို ပြသ
         bot.sendPhoto(ADMIN_ID, msg.photo[msg.photo.length - 1].file_id, {
             caption: `💰 Order: ${name} | ${plan.name}\nType: ${type === 'RENEW' ? '🔄 RENEW' : '🛒 NEW'}`,
             reply_markup: { inline_keyboard: [[{ text: "✅ Approve", callback_data: `approve_${chatId}` }, { text: "❌ Reject", callback_data: `reject_${chatId}` }]] }
@@ -384,12 +393,15 @@ bot.onText(/\/manage[ _](.+)/, async (msg, match) => { if (String(msg.chat.id) =
 async function showMyKey(chatId, userName) { 
     try {
         const [kRes] = await Promise.all([client.get(`${OUTLINE_API_URL}/access-keys`)]);
-        const myKey = kRes.data.accessKeys.find(k => k.name.includes(userName)); 
         
-        if (!myKey) return bot.sendMessage(chatId, "❌ **Key Not Found**\n(Name mismatch? Contact Admin or buy a key.)", { parse_mode: 'Markdown' });
+        // 🌟 Key ကို User ID ဖြင့် ရှာဖွေပါ
+        const myKey = kRes.data.accessKeys.find(k => k.name.startsWith(`[${chatId}]`)); 
         
-        let cleanName = myKey.name; 
-        if (myKey.name.includes('|')) { const parts = myKey.name.split('|'); cleanName = parts[0].trim(); }
+        if (!myKey) return bot.sendMessage(chatId, "❌ **Key Not Found**\n(Key ကို ဝယ်ယူပြီးပါက /start နှိပ်၍ ပြန်စစ်ဆေးပါ)", { parse_mode: 'Markdown' });
+        
+        // Key Name မှ User ID ကို ဖြုတ်၍ ပြသ
+        let cleanName = myKey.name.replace(`[${chatId}] | `, ''); 
+        if (myKey.name.includes('|')) { const parts = myKey.name.split('|'); cleanName = parts[0].trim().replace(`[${chatId}] | `, ''); }
 
         cleanName = cleanName.replace(/[_*\[\]()~`>#+\-=|{}.!]/g, " ");
 
@@ -417,10 +429,11 @@ async function showMyKey(chatId, userName) {
 async function checkUserStatus(chatId, userName) { 
     try {
         const [kRes, mRes] = await Promise.all([client.get(`${OUTLINE_API_URL}/access-keys`), client.get(`${OUTLINE_API_URL}/metrics/transfer`)]);
-        // userName (Full Name) ဖြင့် Key ကို ရှာဖွေ
-        const myKey = kRes.data.accessKeys.find(k => k.name.includes(userName)); 
         
-        if (!myKey) return bot.sendMessage(chatId, "❌ **Account Not Found**\n(Name mismatch? Contact Admin)", { parse_mode: 'Markdown' });
+        // 🌟 Key ကို User ID ဖြင့် ရှာဖွေပါ
+        const myKey = kRes.data.accessKeys.find(k => k.name.startsWith(`[${chatId}]`)); 
+        
+        if (!myKey) return bot.sendMessage(chatId, "❌ **Account Not Found**\n(Key ကို ဝယ်ယူပြီးပါက /start နှိပ်၍ ပြန်စစ်ဆေးပါ)", { parse_mode: 'Markdown' });
         
         const used = mRes.data.bytesTransferredByUserId[myKey.id] || 0;
         const limit = myKey.dataLimit ? myKey.dataLimit.bytes : 0;
@@ -435,11 +448,14 @@ async function checkUserStatus(chatId, userName) {
             cleanName = parts[0].trim(); 
             expireDate = parts[1].trim(); 
         }
+        
+        // Key Name မှ User ID ကို ဖြုတ်၍ ပြသရန်
+        cleanName = cleanName.replace(`[${chatId}] | `, '');
 
         // Sanitize Name
         cleanName = cleanName.replace(/[_*\[\]()~`>#+\-=|{}.!]/g, " ");
 
-        let status = "🟢 Active"; // Default ကို Active ပြောင်းလိုက်သည်
+        let status = "🟢 Active"; 
         
         // Data Limit 0 ဖြစ်နေပါက Unlimited ဟု ပြသရန်
         const displayRemaining = limit === 0 ? "Unlimited" : formatBytes(remaining > 0 ? remaining : 0);
@@ -466,7 +482,7 @@ async function checkUserStatus(chatId, userName) {
 📅 **Expire:** ${remainingDays}
 
 ${progressBarDisplay}
-`; // Key String ကို ဤနေရာမှ ဖယ်ရှားထားသည်။
+`; 
         const opts = { parse_mode: 'Markdown' };
         // Renew Button Logic
         if ((limit <= 5000 && limit > 0) || remainingDays === "Expired") opts.reply_markup = { inline_keyboard: [[{ text: "🔄 RENEW KEY NOW", callback_data: `renew_start_${myKey.id}` }]] };
@@ -482,8 +498,8 @@ ${progressBarDisplay}
 async function createKeyForUser(userId, plan, userName) {
     try {
         const expireDate = getMyanmarDate(plan.days); // Use MM Time
-        // Key Name: Full Name + Username + Date
-        const name = `${userName.replace(/\|/g, '').trim()} | ${expireDate}`; 
+        // Key Name: [USER_ID] | Name | Date
+        const name = `[${userId}] | ${userName.replace(/\|/g, '').trim()} | ${expireDate}`; // 🌟 User ID ထည့်သွင်း
         const limit = plan.gb * 1024 * 1024 * 1024;
         const res = await client.post(`${OUTLINE_API_URL}/access-keys`);
         await client.put(`${OUTLINE_API_URL}/access-keys/${res.data.id}/name`, { name });
@@ -492,12 +508,12 @@ async function createKeyForUser(userId, plan, userName) {
     } catch (e) { return null; }
 }
 
-async function renewKeyForUser(keyId, plan, userName) {
+async function renewKeyForUser(keyId, plan, userName, userId) { // 🌟 Renew အတွက် userId ကို လက်ခံ
     try {
         const expireDate = getMyanmarDate(plan.days); // Use MM Time
         const cleanName = userName.replace('TEST_', '').replace(/\|/g, '').trim();
-        // Key Name: Full Name + Username + Date
-        const name = `${cleanName} | ${expireDate}`;
+        // Key Name: [USER_ID] | Name | Date
+        const name = `[${userId}] | ${cleanName} | ${expireDate}`; // 🌟 User ID ထည့်သွင်း
         const limit = plan.gb * 1024 * 1024 * 1024;
         await client.put(`${OUTLINE_API_URL}/access-keys/${keyId}/name`, { name });
         await client.put(`${OUTLINE_API_URL}/access-keys/${keyId}/data-limit`, { limit: { bytes: limit } });
@@ -532,6 +548,11 @@ async function sendKeyDetails(chatId, keyId) {
         
         let cleanName = key.name; let expireDate = "Unlimited";
         if (key.name.includes('|')) { const parts = key.name.split('|'); cleanName = parts[0].trim(); expireDate = parts[1].trim(); }
+        
+        // Key Name မှ User ID ကို ဖြုတ်၍ ပြသရန်
+        const userIdMatch = cleanName.match(/^\[(\d+)\] \| (.*)/);
+        if (userIdMatch) { cleanName = userIdMatch[2]; }
+
 
         let status = "🟢 Active";
         if (limit > 0 && remaining <= 0) status = "🔴 Data Depleted";
@@ -572,14 +593,14 @@ async function runGuardian() {
         const now = Date.now();
         for (const k of keys) {
             const lim = k.dataLimit ? k.dataLimit.bytes : 0;
-            const isTestKey = k.name.startsWith("TEST_");
-            if (isTestKey) {
+            const isTestKey = k.name.includes("TEST_");
+            if (isTestKey) { // Test Key Logic
                 let testExpired = false;
                 if (k.name.includes('|')) { const d = k.name.split('|')[1].trim(); if (/^\d{4}-\d{2}-\d{2}$/.test(d) && d < today) testExpired = true; }
                 if (lim > 0 && (usage[k.id] || 0) >= lim) testExpired = true;
                 if (testExpired) { await client.delete(`${OUTLINE_API_URL}/access-keys/${k.id}`); continue; }
             }
-            if (!isTestKey) {
+            if (!isTestKey) { // Premium Key Logic
                 // Unlimited (lim=0) ဆိုရင် ဒီအောက်က block ကို ကျော်သွားပါမည်
                 if (lim > 0 && lim <= 5000) { 
                     if (!blockedKeys[k.id]) { blockedKeys[k.id] = now; } 
