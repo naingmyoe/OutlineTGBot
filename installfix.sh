@@ -13,12 +13,18 @@ echo -e "${GREEN} 🚀 VPN SHOP BOT INSTALLER (MYANMAR TIME)  ${NC}"
 echo -e "${GREEN}===========================================${NC}"
 
 # --- 1. Bot & Server Config ---
-echo -e "${CYAN}--- [1/3] SERVER CONFIGURATION ---${NC}"
+echo -e "\n${CYAN}--- [1/3] SERVER CONFIGURATION ---${NC}"
 read -p "1. Enter Telegram Bot Token: " BOT_TOKEN
 echo -e "${YELLOW}⚠️  Note: API URL must start with 'https://' and end with secret key.${NC}"
 read -p "2. Enter Outline API URL: " API_URL
 read -p "3. Enter Admin Telegram ID (Numeric only): " ADMIN_ID
 read -p "4. Enter Admin Username (e.g. @admin): " ADMIN_USERNAME
+
+# Input Validation
+if [[ -z "$BOT_TOKEN" || -z "$API_URL" || -z "$ADMIN_ID" ]]; then
+    echo -e "${RED}❌ ERROR: Bot Token, API URL, or Admin ID cannot be empty.${NC}"
+    exit 1
+fi
 
 echo -e ""
 # --- 2. Payment Configuration ---
@@ -27,6 +33,12 @@ read -p "1. Kpay Phone Number: " KPAY_NUM
 read -p "   Kpay Account Name: " KPAY_NAME
 read -p "2. Wave Phone Number: " WAVE_NUM
 read -p "   Wave Account Name: " WAVE_NAME
+
+# Set payment variables for bot.js
+KPAY_INFO_TEXT="💸 Kpay: $KPAY_NUM ($KPAY_NAME)"
+WAVE_INFO_TEXT="💰 Wave: $WAVE_NUM ($WAVE_NAME)"
+KPAY_COPY_DATA="$KPAY_NUM"
+WAVE_COPY_DATA="$WAVE_NUM"
 
 echo -e ""
 # --- 3. Plan Customization ---
@@ -50,7 +62,7 @@ read -p "   GB Amount (e.g., 50): " P3_GB
 read -p "   Duration Days (e.g., 999): " P3_DAYS
 read -p "   Price (e.g., 12000 MMK): " P3_PRICE
 
-# Set Defaults
+# Set Defaults (If inputs are empty)
 P1_GB=${P1_GB:-10}; P1_DAYS=${P1_DAYS:-30}; P1_PRICE=${P1_PRICE:-3,000 MMK}
 P2_GB=${P2_GB:-30}; P2_DAYS=${P2_DAYS:-30}; P2_PRICE=${P2_PRICE:-7,000 MMK}
 P3_GB=${P3_GB:-50}; P3_DAYS=${P3_DAYS:-999}; P3_PRICE=${P3_PRICE:-12,000 MMK}
@@ -59,6 +71,9 @@ P3_GB=${P3_GB:-50}; P3_DAYS=${P3_DAYS:-999}; P3_PRICE=${P3_PRICE:-12,000 MMK}
 # SYSTEM SETUP
 # ---------------------------------------------------------
 echo -e "\n${YELLOW}🔄 Updating System & Installing Node.js...${NC}"
+if ! command -v curl &> /dev/null; then
+    apt update && apt install -y curl
+fi
 apt update && apt upgrade -y
 curl -fsSL https://deb.nodesource.com/setup_18.x | sudo -E bash -
 apt install -y nodejs
@@ -70,7 +85,7 @@ cd /root/vpn-shop
 
 echo -e "${YELLOW}📦 Installing Libraries...${NC}"
 npm init -y > /dev/null 2>&1
-npm install axios node-telegram-bot-api pm2 -g
+npm install axios node-telegram-bot-api
 npm install pm2 -g
 
 # ---------------------------------------------------------
@@ -101,14 +116,16 @@ const PLANS = {
     'plan_3': { name: 'REPLACE_P3_DAYS Days - REPLACE_P3_GB GB', days: REPLACE_P3_DAYS, gb: REPLACE_P3_GB, price: 'REPLACE_P3_PRICE' }
 };
 
-const PAYMENT_INFO = `
-💸 **Payment Methods:**
-1️⃣ Kpay: \`REPLACE_KPAY_NUM\` (REPLACE_KPAY_NAME)
-2️⃣ Wave: \`REPLACE_WAVE_NUM\` (REPLACE_WAVE_NAME)
+const PAYMENT_INFO_TEXT = `
+💸 **ငွေပေးချေရန်:**
+1. REPLACE_KPAY_INFO_TEXT
+2. REPLACE_WAVE_INFO_TEXT
 
 ⚠️ ငွေလွှဲပြီးပါက ပြေစာ (Screenshot) ပို့ပေးပါ။
 `;
 
+const KPAY_NUM = 'REPLACE_KPAY_NUM_FOR_COPY';
+const WAVE_NUM = 'REPLACE_WAVE_NUM_FOR_COPY';
 const CHECK_INTERVAL = 10000; 
 // ================================================================
 
@@ -121,6 +138,7 @@ let blockedKeys = {};
 const CLAIM_FILE = 'claimed_users.json';
 let claimedUsers = [];
 if (fs.existsSync(CLAIM_FILE)) { try { claimedUsers = JSON.parse(fs.readFileSync(CLAIM_FILE)); } catch(e) {} }
+const adminMessageCache = {};
 
 // --- HELPERS (MYANMAR TIME) ---
 function formatBytes(bytes) {
@@ -138,18 +156,16 @@ function getMyanmarDate(offsetDays = 0) {
 
 function getDaysRemaining(dateString) {
     if (!/^\d{4}-\d{2}-\d{2}$/.test(dateString)) return "Unknown";
-    
     const todayStr = getMyanmarDate(0); // Use Myanmar Today
     const today = new Date(todayStr);
     const target = new Date(dateString);
     const diffTime = target - today;
     const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
-    
     return diffDays > 0 ? `${diffDays} Days` : "Expired";
 }
 
 function getProgressBar(used, total) {
-    if (total === 0) return "0 B / 0 B"; // Data limit 0 ဆိုရင် 0 B ပြပါမည်
+    if (total === 0) return "ERROR";
     const percentage = Math.min((used / total) * 100, 100);
     const totalLength = 10; 
     const filledLength = Math.round((percentage / 100) * totalLength);
@@ -158,33 +174,25 @@ function getProgressBar(used, total) {
 }
 
 // ================================================================
-// 🎨 MAIN MENU LAYOUT
+// 🎨 MAIN MENU LAYOUT 
 // ================================================================
-const mainMenuKeyboard = {
-    reply_markup: {
-        keyboard: [
-            // Menu နေရာချိန်းခြင်း: Free Trial (1st), ဝယ်ရန် (2nd), Key ကြည့်ရန် (3rd)
-            [{ text: "🆓 အစမ်း Key (1GB)(1Day)" }, { text: "🛒 VPN Key ဝယ်ရန်" }, { text: "🔑 မိမိ VPN Key ကြည့်ရန်" }], 
-            // Package စစ်ရန်, ဆက်သွယ်ရန် (Admin Panel မပါ)
-            [{ text: "👤 Package စစ်ရန်" }, { text: "🆘 ဆက်သွယ်ရန်" }] 
-        ],
-        resize_keyboard: true,
-        one_time_keyboard: false
-    }
-};
+const baseKeyboard = [
+    [{ text: "🆓 အစမ်း Key (1GB)(1Day)" }, { text: "🛒 VPN Key ဝယ်ရန်" }],
+    [{ text: "🔑 VPN KEY ပြရန်" }, { text: "🆘 ဆက်သွယ်ရန်" }]
+];
 
-// Admin အတွက်သာ Menu ချိန်ညှိခြင်း
-const adminKeyboard = {
-    reply_markup: {
-        keyboard: [
-            [{ text: "🆓 အစမ်း Key (1GB)(1Day)" }, { text: "🛒 VPN Key ဝယ်ရန်" }, { text: "🔑 မိမိ VPN Key ကြည့်ရန်" }], 
-            // Admin Panel ကို Package စစ်ရန် နှင့် ဆက်သွယ်ရန် ကြားတွင် ထည့်သွင်းသည်။
-            [{ text: "👤 Package စစ်ရန်" }, { text: "👮‍♂️ Admin Panel" }, { text: "🆘 ဆက်သွယ်ရန်" }]
-        ],
-        resize_keyboard: true,
-        one_time_keyboard: false
-    }
-};
+// Payment Info တွင် Copy ခလုတ် ထည့်ရန် Function
+function getPaymentOptions() {
+    return {
+        parse_mode: 'Markdown',
+        reply_markup: {
+            inline_keyboard: [
+                [{ text: `1️⃣ Kpay ${KPAY_NUM}`, callback_data: 'ignore' }, { text: "📋 Copy", callback_data: `copy_${KPAY_NUM}` }],
+                [{ text: `2️⃣ Wave ${WAVE_NUM}`, callback_data: 'ignore' }, { text: "📋 Copy", callback_data: `copy_${WAVE_NUM}` }]
+            ]
+        }
+    };
+}
 
 
 // 🤖 COMMANDS & MENU HANDLERS
@@ -192,33 +200,25 @@ bot.onText(/\/start/, (msg) => {
     const userId = msg.chat.id;
     console.log(`[DEBUG] User ID: ${userId} | Admin ID Configured: ${ADMIN_ID}`);
 
-    let keyboard = mainMenuKeyboard;
-    
-    // Admin ဖြစ်ပါက adminKeyboard ကို အသုံးပြု
+    let currentKeyboard = baseKeyboard;
+
     if (String(userId) === String(ADMIN_ID)) {
-        keyboard = adminKeyboard;
-        bot.sendMessage(userId, "👮‍♂️ **Admin Detected**\nUse /admin (inline command) to quickly open panel.", { parse_mode: 'Markdown' });
+        bot.sendMessage(userId, "👮‍♂️ **Admin Detected**\nAdmin Panel ကို Key Board တွင် ထည့်သွင်းလိုက်ပါပြီ။", { parse_mode: 'Markdown' });
+        currentKeyboard = [[{ text: "👮‍♂️ Admin Panel" }], ...baseKeyboard]; 
     }
 
-    bot.sendMessage(userId, "👋 မင်္ဂလာပါ VPN Shop မှ ကြိုဆိုပါတယ်။\nမိမိလိုအပ်သော ဝန်ဆောင်မှုကို အောက်တွင် ရွေးချယ်နိုင်ပါသည်။", keyboard);
+    const opts = {
+        reply_markup: {
+            keyboard: currentKeyboard,
+            resize_keyboard: true,
+            one_time_keyboard: false
+        }
+    };
+
+    bot.sendMessage(userId, "👋 မင်္ဂလာပါ VPN Shop မှ ကြိုဆိုပါတယ်။\nမိမိလိုအပ်သော ဝန်ဆောင်မှုကို အောက်တွင် ရွေးချယ်နိုင်ပါသည်။", opts);
 });
 
-// Admin Panel Command
-bot.onText(/\/admin/, (msg) => {
-    if (String(msg.chat.id) === String(ADMIN_ID)) {
-        const opts = {
-            reply_markup: {
-                inline_keyboard: [
-                    [{ text: "👥 User List", callback_data: 'admin_list_users' }],
-                    [{ text: "📊 Check Server", callback_data: 'check_status' }]
-                ]
-            }
-        };
-        bot.sendMessage(msg.chat.id, "👮‍♂️ **Admin Control Panel**", opts);
-    }
-});
-
-// 🌟 Admin Panel Button (ရိုးရိုးစာသား)
+// Admin Panel Command (Menu Button)
 bot.onText(/^(👮‍♂️ Admin Panel)$/, (msg) => {
     if (String(msg.chat.id) === String(ADMIN_ID)) {
         const opts = {
@@ -233,21 +233,27 @@ bot.onText(/^(👮‍♂️ Admin Panel)$/, (msg) => {
     }
 });
 
-// Helper function to get current user's full name and username
-function getUserDetails(msg_or_callbackQuery) {
-    const user = msg_or_callbackQuery.from;
-    const userFullName = `${user.first_name} ${user.last_name || ''}`.trim();
-    const username = user.username ? `@${user.username}` : '';
-    const nameWithUsername = `${userFullName} ${username}`.trim();
-    return { userFullName: userFullName, username: username, nameWithUsername: nameWithUsername };
-}
+// Admin Panel Command (Legacy /admin)
+bot.onText(/\/admin/, (msg) => {
+    if (String(msg.chat.id) === String(ADMIN_ID)) {
+        const opts = {
+            reply_markup: {
+                inline_keyboard: [
+                    [{ text: "👥 User List", callback_data: 'admin_list_users' }],
+                    [{ text: "📊 Check Server", callback_data: 'check_status' }]
+                ]
+            }
+        };
+        bot.sendMessage(msg.chat.id, "👮‍♂️ **Admin Control Panel**", opts);
+    }
+});
 
 // --- MENU BUTTON LOGIC MAPPING ---
 
 // 1. FREE TEST KEY
 bot.onText(/^(🆓 အစမ်း Key \(1GB\)\(1Day\))$/, async (msg) => {
     const chatId = msg.chat.id;
-    const { nameWithUsername } = getUserDetails(msg);
+    const userFullName = `${msg.from.first_name} ${msg.from.last_name || ''}`.trim();
 
     if (claimedUsers.includes(chatId)) { 
         return bot.sendMessage(chatId, "⚠️ **Sorry!**\nမိတ်ဆွေ Test Key ထုတ်ယူပြီးသား ဖြစ်ပါသည်။\nPremium Plan ကို ဝယ်ယူအသုံးပြုပေးပါ။", { parse_mode: 'Markdown' }); 
@@ -256,21 +262,13 @@ bot.onText(/^(🆓 အစမ်း Key \(1GB\)\(1Day\))$/, async (msg) => {
     bot.sendMessage(chatId, "⏳ Creating Test Key...");
     try {
         const expireDate = getMyanmarDate(TEST_PLAN.days); 
-        // Key Name: [USER_ID] | Name | Date
-        const name = `[${chatId}] | TEST_${nameWithUsername.replace(/\|/g, '').trim()} | ${expireDate}`; 
+        const name = `TEST_${userFullName.replace(/\|/g, '').trim()} | ${expireDate}`; 
         const limit = TEST_PLAN.gb * 1024 * 1024 * 1024;
         const res = await client.post(`${OUTLINE_API_URL}/access-keys`);
         await client.put(`${OUTLINE_API_URL}/access-keys/${res.data.id}/name`, { name });
         await client.put(`${OUTLINE_API_URL}/access-keys/${res.data.id}/data-limit`, { limit: { bytes: limit } });
         claimedUsers.push(chatId); fs.writeFileSync(CLAIM_FILE, JSON.stringify(claimedUsers));
-        
-        // Key String တွင် Telegram Name ကို ထည့်သွင်းပြသရန် ပြင်ဆင်
-        let keyString = res.data.accessUrl;
-        const cleanNameEncoded = encodeURIComponent(nameWithUsername.trim());
-        keyString = keyString.replace(/#.+$/, ''); // Remove existing hash fragment
-        keyString += `#${cleanNameEncoded}`;
-        
-        bot.sendMessage(chatId, `🎉 **Free Trial Created!**\n\n👤 Name: ${nameWithUsername}\n📦 Limit: 1 GB\n📅 Expire: 1 Day\n\n🔗 **Key:**\n\`${keyString}\``, { parse_mode: 'Markdown' });
+        bot.sendMessage(chatId, `🎉 **Free Trial Created!**\n\n👤 Name: ${userFullName}\n📦 Limit: 1 GB\n📅 Expire: 1 Day\n\n🔗 **Key:**\n\`${res.data.accessUrl}\``, { parse_mode: 'Markdown' }); 
     } catch (e) { bot.sendMessage(chatId, "❌ Error creating test key."); }
 });
 
@@ -280,28 +278,18 @@ bot.onText(/^(🛒 VPN Key ဝယ်ရန်)$/, (msg) => {
     bot.sendMessage(msg.chat.id, "📅 **မိမိဝယ်ယူလိုသော Plan ကို ရွေးချယ်ပါ:**", { parse_mode: 'Markdown', reply_markup: { inline_keyboard: keyboard } });
 });
 
-// 3. SHOW MY KEY 
-bot.onText(/^(🔑 မိမိ VPN Key ကြည့်ရန်)$/, async (msg) => {
-    const chatId = msg.chat.id;
-    const { nameWithUsername } = getUserDetails(msg);
-    bot.sendMessage(chatId, "🔎 Searching for your Key...");
-    await showMyKey(chatId, nameWithUsername); 
+// 3. MY ACCOUNT (🔑 VPN KEY ပြရန်)
+bot.onText(/^(🔑 VPN KEY ပြရန်)$/, async (msg) => { 
+    const userFullName = `${msg.from.first_name} ${msg.from.last_name || ''}`.trim();
+    bot.sendMessage(msg.chat.id, "🔎 Checking Account Status...");
+    await checkUserStatus(msg.chat.id, userFullName); 
 });
 
-// 4. MY ACCOUNT (Package စစ်ရန်)
-bot.onText(/^(👤 Package စစ်ရန်)$/, async (msg) => {
-    const chatId = msg.chat.id;
-    const { nameWithUsername } = getUserDetails(msg);
-    bot.sendMessage(chatId, "🔎 Checking Account Status...");
-    await checkUserStatus(chatId, nameWithUsername); 
-});
-
-// 5. CONTACT ADMIN
+// 4. CONTACT ADMIN
 bot.onText(/^(🆘 ဆက်သွယ်ရန်)$/, (msg) => {
-    const { nameWithUsername } = getUserDetails(msg);
     bot.sendMessage(msg.chat.id, "🆘 Admin သို့ တိုက်ရိုက်ဆက်သွယ်ရန် အောက်ပါခလုတ်ကို နှိပ်ပါ။", {
-        reply_markup: { inline_keyboard: [[{ text: "💬 Chat with Admin", url: `https://t.me/REPLACE_ADMIN_USER` }]] }
-    });
+        reply_markup: { inline_keyboard: [[{ text: "💬 Chat with Admin", url: `https://t.me/REPLACE_ADMIN_USER` }]]
+    }});
 });
 
 // 🤖 CALLBACK QUERY
@@ -309,43 +297,33 @@ bot.on('callback_query', async (callbackQuery) => {
     const msg = callbackQuery.message;
     const chatId = msg.chat.id;
     const data = callbackQuery.data;
-    const { nameWithUsername } = getUserDetails(callbackQuery);
-
-    // (Inline button version of Test Key)
-    if (data === 'get_test_key') {
-        if (claimedUsers.includes(chatId)) { return bot.sendMessage(chatId, "⚠️ **Sorry!**\nမိတ်ဆွေ Test Key ထုတ်ယူပြီးသား ဖြစ်ပါသည်။"); }
-        bot.sendMessage(chatId, "⏳ Creating Test Key...");
-        try {
-            const expireDate = getMyanmarDate(TEST_PLAN.days); 
-            const name = `[${chatId}] | TEST_${nameWithUsername.replace(/\|/g, '').trim()} | ${expireDate}`; // User ID ဖြင့် ဖန်တီး
-            const limit = TEST_PLAN.gb * 1024 * 1024 * 1024;
-            const res = await client.post(`${OUTLINE_API_URL}/access-keys`);
-            await client.put(`${OUTLINE_API_URL}/access-keys/${res.data.id}/name`, { name });
-            await client.put(`${OUTLINE_API_URL}/access-keys/${res.data.id}/data-limit`, { limit: { bytes: limit } });
-            claimedUsers.push(chatId); fs.writeFileSync(CLAIM_FILE, JSON.stringify(claimedUsers));
-            
-            // Key String တွင် Telegram Name ကို ထည့်သွင်းပြသရန် ပြင်ဆင်
-            let keyString = res.data.accessUrl;
-            const cleanNameEncoded = encodeURIComponent(nameWithUsername.trim());
-            keyString = keyString.replace(/#.+$/, ''); // Remove existing hash fragment
-            keyString += `#${cleanNameEncoded}`;
-            
-            bot.sendMessage(chatId, `🎉 **Free Trial Created!**\n\n👤 Name: ${nameWithUsername}\n📦 Limit: 1 GB\n📅 Expire: 1 Day\n\n🔗 **Key:**\n\`${keyString}\``, { parse_mode: 'Markdown' });
-        } catch (e) { bot.sendMessage(chatId, "❌ Error."); }
+    const userFullName = `${callbackQuery.from.first_name} ${callbackQuery.from.last_name || ''}`.trim();
+    
+    // Copy Command Handler
+    if (data.startsWith('copy_')) {
+        const textToCopy = data.substring(5); 
+        bot.answerCallbackQuery(callbackQuery.id, { text: `✅ ${textToCopy} copied!`, show_alert: false });
         return;
     }
 
-    if (data === 'check_status') { bot.sendMessage(chatId, "🔎 Checking..."); await checkUserStatus(chatId, nameWithUsername); }
+    if (data === 'check_status') { bot.sendMessage(chatId, "🔎 Checking..."); await checkUserStatus(chatId, userFullName); } 
+    
+    // Admin Check ID Callback (New Feature)
+    if (data.startsWith('admin_check_id_')) {
+        const keyId = data.split('_')[3];
+        bot.sendMessage(chatId, `🔎 Checking details for Key ID: ${keyId}...`);
+        await sendKeyDetails(chatId, keyId);
+        return;
+    }
+
 
     if (data.startsWith('select_')) {
         const realPlanKey = data.match(/plan_\d+/)[0]; 
         const realType = data.includes('RENEW') ? 'RENEW' : 'NEW';
         const realKeyId = data.split('_').pop();
+        userStates[chatId] = { status: 'WAITING_SLIP', plan: PLANS[realPlanKey], name: userFullName, type: realType, renewKeyId: realKeyId }; 
         
-        // Key Name: [USER_ID] | Name
-        const newKeyName = `[${chatId}] | ${nameWithUsername}`;
-        userStates[chatId] = { status: 'WAITING_SLIP', plan: PLANS[realPlanKey], name: newKeyName, type: realType, renewKeyId: realKeyId }; 
-        bot.sendMessage(chatId, `✅ **Selected:** ${PLANS[realPlanKey].name}\n💰 **Price:** ${PLANS[realPlanKey].price}\n\n${PAYMENT_INFO}`, { parse_mode: 'Markdown' });
+        bot.sendMessage(chatId, `✅ **Selected:** ${PLANS[realPlanKey].name}\n💰 **Price:** ${PLANS[realPlanKey].price}\n\n${PAYMENT_INFO_TEXT}`, getPaymentOptions());
     }
 
     if (data.startsWith('renew_start_')) {
@@ -354,39 +332,51 @@ bot.on('callback_query', async (callbackQuery) => {
         bot.sendMessage(chatId, "🔄 **Renew လုပ်မည့် Plan ကို ရွေးချယ်ပါ:**", { parse_mode: 'Markdown', reply_markup: { inline_keyboard: keyboard } });
     }
 
+    // Admin Logic
     if (String(chatId) === String(ADMIN_ID)) {
         if (data === 'admin_list_users') await sendUserList(chatId);
+        
         if (data.startsWith('approve_')) {
             const buyerId = data.split('_')[1];
             if (userStates[buyerId]) {
                 const { plan, name, type, renewKeyId } = userStates[buyerId];
                 bot.editMessageCaption("✅ Approved", { chat_id: ADMIN_ID, message_id: msg.message_id });
                 let resultKey;
-                
-                if (type === 'RENEW') resultKey = await renewKeyForUser(renewKeyId, plan, name, buyerId);
+                if (type === 'RENEW') resultKey = await renewKeyForUser(renewKeyId, plan, name);
                 else resultKey = await createKeyForUser(buyerId, plan, name);
-
                 if (resultKey) {
-                    // Message ပြန်ပို့ရာတွင် Key Name မှ User ID ကို ဖြုတ်၍ ပို့သည်
-                    const cleanNameForMsg = name.replace(`[${buyerId}] | `, '');
-                    
-                    // Key String တွင် Telegram Name ကို ထည့်သွင်းပြသရန် ပြင်ဆင်
-                    let keyString = resultKey.accessUrl;
-                    const cleanNameEncoded = encodeURIComponent(cleanNameForMsg.trim());
-                    keyString = keyString.replace(/#.+$/, ''); // Remove existing hash fragment
-                    keyString += `#${cleanNameEncoded}`;
-
-                    bot.sendMessage(buyerId, `🎉 **Success!**\n\n👤 Name: ${cleanNameForMsg}\n📅 Expire: ${resultKey.expireDate}\n\n🔗 **Key:**\n\`${keyString}\``, { parse_mode: 'Markdown' });
+                    bot.sendMessage(buyerId, `🎉 **Success!**\n\n👤 Name: ${name}\n📅 Expire: ${resultKey.expireDate}\n\n🔗 **Key:**\n\`${resultKey.accessUrl}\``, { parse_mode: 'Markdown' });
                     delete userStates[buyerId];
                 }
             }
         }
+
+        // Delete Confirmation Step
         if (data.startsWith('confirm_delete_')) {
             const keyId = data.split('_')[2];
+            adminMessageCache[keyId] = msg.message_id; 
+            
             bot.sendMessage(chatId, `⚠️ Delete Key ID: ${keyId}?`, { reply_markup: { inline_keyboard: [[{ text: "✅ YES", callback_data: `do_delete_${keyId}` }, { text: "❌ NO", callback_data: `cancel_delete` }]] } });
         }
-        if (data.startsWith('do_delete_')) { await client.delete(`${OUTLINE_API_URL}/access-keys/${data.split('_')[2]}`); bot.sendMessage(chatId, "✅ Deleted."); }
+        
+        // Final Delete Step
+        if (data.startsWith('do_delete_')) {
+            const keyId = data.split('_')[2];
+            await client.delete(`${OUTLINE_API_URL}/access-keys/${keyId}`); 
+            bot.sendMessage(chatId, "✅ Deleted.");
+            
+            // 1. Delete Confirmation Message (လက်ရှိ Message) ကို ဖျက်သည်
+            bot.deleteMessage(chatId, msg.message_id).catch(e => console.error("Error deleting confirmation msg:", e.message));
+            
+            // 2. Delete Key Management Message (cache ထဲက Message) ကို ဖျက်သည်
+            if (adminMessageCache[keyId]) {
+                bot.deleteMessage(chatId, adminMessageCache[keyId]).catch(e => console.error("Error deleting key details msg:", e.message));
+                delete adminMessageCache[keyId];
+            }
+        }
+        
         if (data === 'cancel_delete') bot.deleteMessage(chatId, msg.message_id);
+        
         if (data.startsWith('reject_')) { bot.sendMessage(data.split('_')[1], "❌ Rejected."); bot.editMessageCaption("❌ Rejected", { chat_id: ADMIN_ID, message_id: msg.message_id }); }
     }
 });
@@ -396,153 +386,79 @@ bot.on('photo', async (msg) => {
     if (userStates[chatId] && userStates[chatId].status === 'WAITING_SLIP') {
         const { plan, name, type } = userStates[chatId];
         bot.sendMessage(chatId, "📩 Slip Received.");
-        
-        // Admin ကို ပို့သည့် Message တွင် Key Name အပြည့်အစုံကို ပြသ
         bot.sendPhoto(ADMIN_ID, msg.photo[msg.photo.length - 1].file_id, {
             caption: `💰 Order: ${name} | ${plan.name}\nType: ${type === 'RENEW' ? '🔄 RENEW' : '🛒 NEW'}`,
-            reply_markup: { inline_keyboard: [[{ text: "✅ Approve", callback_data: `approve_${chatId}` }, { text: "❌ Reject", callback_data: `reject_${chatId}` }]] }
-        });
+            reply_markup: { inline_keyboard: [[{ text: "✅ Approve", callback_data: `approve_${chatId}` }, { text: "❌ Reject", callback_data: `reject_${chatId}` }]]
+        }});
     }
 });
-bot.onText(/\/manage[ _](.+)/, async (msg, match) => { if (String(msg.chat.id) === String(ADMIN_ID)) await sendKeyDetails(msg.chat.id, match[1].trim()); });
 
+// Admin Key Detail Management
+bot.onText(/\/manage[ _](.+)/, async (msg, match) => { 
+    if (String(msg.chat.id) === String(ADMIN_ID)) await sendKeyDetails(msg.chat.id, match[1].trim()); 
+});
 
-// 🔑 Function to only show the Key String 
-async function showMyKey(chatId, currentUserName) { // currentUserName သည် Auto Update အတွက် လိုအပ်သည်
-    try {
-        const [kRes] = await Promise.all([client.get(`${OUTLINE_API_URL}/access-keys`)]);
-        
-        // Key ကို User ID ဖြင့် ရှာဖွေပါ
-        const myKey = kRes.data.accessKeys.find(k => k.name.startsWith(`[${chatId}]`)); 
-        
-        if (!myKey) return bot.sendMessage(chatId, "❌ **Key Not Found**\n(Key ကို ဝယ်ယူပြီးပါက /start နှိပ်၍ ပြန်စစ်ဆေးပါ)", { parse_mode: 'Markdown' });
-        
-        // 🌟 Name Auto-Update Logic
-        const expireDate = myKey.name.includes('|') ? myKey.name.split('|')[1].trim() : "Unknown";
-        const newKeyName = `[${chatId}] | ${currentUserName} | ${expireDate}`;
-        
-        if (myKey.name !== newKeyName) {
-            await client.put(`${OUTLINE_API_URL}/access-keys/${myKey.id}/name`, { name: newKeyName });
-            bot.sendMessage(chatId, "✅ Telegram Name ကို Key Name တွင် အလိုအလျောက် အပ်ဒိတ် လုပ်လိုက်ပါပြီ။");
-            myKey.name = newKeyName; // Update local copy
-        }
-        
-        // Key Name မှ User ID ကို ဖြုတ်၍ ပြသ
-        let cleanName = myKey.name.replace(`[${chatId}] | `, ''); 
-        if (myKey.name.includes('|')) { cleanName = myKey.name.split('|')[0].trim().replace(`[${chatId}] | `, ''); }
+// --- CORE FUNCTIONS ---
 
-        cleanName = cleanName.replace(/[_*\[\]()~`>#+\-=|{}.!]/g, " ");
-
-        // 🌟 Key String တွင် Telegram Name ကို ထည့်သွင်းပြသရန် ပြင်ဆင်
-        let keyString = myKey.accessUrl;
-        const cleanNameEncoded = encodeURIComponent(cleanName.trim());
-        keyString = keyString.replace(/#.+$/, ''); // Remove existing hash fragment
-        keyString += `#${cleanNameEncoded}`;
-        
-        const msg = `
-🔑 **Your VPN Key**
------------------------
-👤 Name: ${cleanName}
-
-🔗 **Key String:**
-\`${keyString}\`
-
-*Key ကို နှိပ်၍ Copy ကူးပြီး Outline App တွင် ထည့်သွင်း အသုံးပြုနိုင်ပါသည်။*
-`;
-        const opts = { parse_mode: 'Markdown' };
-        bot.sendMessage(chatId, msg, opts);
-    } catch (e) { 
-        console.error("Show Key Error:", e);
-        bot.sendMessage(chatId, "⚠️ Server Error while retrieving key."); 
-    }
-}
-
-
-// --- CORE FUNCTIONS (USER VIEW) ---
-// Key String ပြသခြင်းကို ဖယ်ရှားထားပြီး Data/Day အတွက် ပြင်ဆင်ပြီးသား Function 
-async function checkUserStatus(chatId, currentUserName) { // currentUserName သည် Auto Update အတွက် လိုအပ်သည်
+async function checkUserStatus(chatId, userName) { 
     try {
         const [kRes, mRes] = await Promise.all([client.get(`${OUTLINE_API_URL}/access-keys`), client.get(`${OUTLINE_API_URL}/metrics/transfer`)]);
+        const myKey = kRes.data.accessKeys.find(k => k.name.includes(userName)); 
         
-        // 🌟 Key ကို User ID ဖြင့် ရှာဖွေပါ
-        const myKey = kRes.data.accessKeys.find(k => k.name.startsWith(`[${chatId}]`)); 
-        
-        if (!myKey) return bot.sendMessage(chatId, "❌ **Account Not Found**\n(Key ကို ဝယ်ယူပြီးပါက /start နှိပ်၍ ပြန်စစ်ဆေးပါ)", { parse_mode: 'Markdown' });
+        if (!myKey) return bot.sendMessage(chatId, "❌ **Account Not Found**\n(Key not created yet, or Name mismatch? Contact Admin)");
         
         const used = mRes.data.bytesTransferredByUserId[myKey.id] || 0;
         const limit = myKey.dataLimit ? myKey.dataLimit.bytes : 0;
         const remaining = limit - used;
         
-        // Duration/Expiry date ကို Unknown အဖြစ် ပြန်ပြောင်း
-        let cleanName = myKey.name; 
-        let expireDate = "Unknown"; 
-        
-        if (myKey.name.includes('|')) { 
-            const parts = myKey.name.split('|'); 
-            cleanName = parts[0].trim(); 
-            expireDate = parts[1].trim(); 
-        }
+        let cleanName = myKey.name; let expireDate = "Unknown";
+        if (myKey.name.includes('|')) { const parts = myKey.name.split('|'); cleanName = parts[0].trim(); expireDate = parts[1].trim(); }
 
-        // 🌟 Name Auto-Update Logic
-        const newKeyName = `[${chatId}] | ${currentUserName} | ${expireDate}`;
-        
-        if (myKey.name !== newKeyName) {
-            await client.put(`${OUTLINE_API_URL}/access-keys/${myKey.id}/name`, { name: newKeyName });
-            bot.sendMessage(chatId, "✅ Telegram Name ကို Key Name တွင် အလိုအလျောက် အပ်ဒိတ် လုပ်လိုက်ပါပြီ။");
-            myKey.name = newKeyName; // Update local copy
-        }
-        
-        // Key Name မှ User ID ကို ဖြုတ်၍ ပြသရန်
-        cleanName = cleanName.replace(`[${chatId}] | `, '');
-
-        // Sanitize Name
         cleanName = cleanName.replace(/[_*\[\]()~`>#+\-=|{}.!]/g, " ");
 
-        let status = "🟢 Active"; 
-        
-        // Data Limit 0 ဖြစ်ပါက 0 B အဖြစ်သာ ပြသရန်
-        const displayRemaining = formatBytes(remaining > 0 ? remaining : 0);
-
-        // Data Depleted စစ်ဆေးခြင်း
+        let status = "🟢 Active";
         if (limit > 0 && remaining <= 0) { status = "🔴 Data Depleted"; }
-        
-        // Expired/Blocked စစ်ဆေးခြင်း
-        if (limit <= 5000 && limit > 0) { status = "🔴 Expired/Blocked"; } 
-        
-        if (cleanName.startsWith("TEST_")) status += " (TRIAL)";
+        if (limit <= 5000) { status = "🔴 Expired/Blocked"; }
+        if (myKey.name.startsWith("TEST_")) status += " (TRIAL)";
 
         const remainingDays = getDaysRemaining(expireDate);
-
-        // ProgressBar ကို 0 B/0 B ပုံစံဖြင့် ပြန်ပြောင်း
-        const progressBarDisplay = getProgressBar(used, limit);
+        const keyId = myKey.id; 
 
         const msg = `
 👤 **Name:** ${cleanName}
 📡 **Status:** ${status}
 ⏳ **Remaining Day:** ${remainingDays}
 ⬇️ **Used:** ${formatBytes(used)}
-🎁 **Remaining Data:** ${displayRemaining}
-📅 **Expire:** ${remainingDays}
+🎁 **Remaining Data:** ${formatBytes(remaining > 0 ? remaining : 0)}
+📅 **Expire:** ${expireDate}
 
-${progressBarDisplay}
-`; // Key String ကို ဤနေရာမှ ဖယ်ရှားထားသည်။
-        const opts = { parse_mode: 'Markdown' };
-        // Renew Button Logic
-        if ((limit <= 5000 && limit > 0) || remainingDays === "Expired") opts.reply_markup = { inline_keyboard: [[{ text: "🔄 RENEW KEY NOW", callback_data: `renew_start_${myKey.id}` }]] };
-        else if (cleanName.startsWith("TEST_") && (limit <= 5000 || remainingDays === "Expired")) opts.reply_markup = { inline_keyboard: [[{ text: "🛒 Upgrade to Premium", callback_data: `buy_vpn` }]] };
+${getProgressBar(used, limit)}
+
+🔗 **Key URL:**
+\`${myKey.accessUrl}\` 
+`;
+        let inlineKeyboard = [];
+        
+        if (limit <= 5000 && !myKey.name.startsWith("TEST_")) {
+            inlineKeyboard.push([{ text: "🔄 RENEW KEY NOW", callback_data: `renew_start_${keyId}` }]);
+        } else if (limit <= 5000 && myKey.name.startsWith("TEST_")) {
+             inlineKeyboard.push([{ text: "🛒 Upgrade to Premium", callback_data: `buy_vpn` }]);
+        }
+        
+        const opts = { parse_mode: 'Markdown', reply_markup: { inline_keyboard: inlineKeyboard } };
         
         bot.sendMessage(chatId, msg, opts);
     } catch (e) { 
         console.error(e);
-        bot.sendMessage(chatId, "⚠️ Server Error."); 
+        bot.sendMessage(chatId, "⚠️ Server Error. Please contact Admin."); 
     }
 }
 
+
 async function createKeyForUser(userId, plan, userName) {
     try {
-        const expireDate = getMyanmarDate(plan.days); // Use MM Time
-        // Key Name: [USER_ID] | Name | Date
-        const name = `[${userId}] | ${userName.replace(/\|/g, '').trim()} | ${expireDate}`; // 🌟 User ID ဖြင့် မှတ်သား
+        const expireDate = getMyanmarDate(plan.days); 
+        const name = `${userName.replace(/\|/g, '').trim()} | ${expireDate}`; 
         const limit = plan.gb * 1024 * 1024 * 1024;
         const res = await client.post(`${OUTLINE_API_URL}/access-keys`);
         await client.put(`${OUTLINE_API_URL}/access-keys/${res.data.id}/name`, { name });
@@ -551,12 +467,11 @@ async function createKeyForUser(userId, plan, userName) {
     } catch (e) { return null; }
 }
 
-async function renewKeyForUser(keyId, plan, userName, userId) { // Renew တွင် User ID လိုအပ်
+async function renewKeyForUser(keyId, plan, userName) {
     try {
-        const expireDate = getMyanmarDate(plan.days); // Use MM Time
+        const expireDate = getMyanmarDate(plan.days); 
         const cleanName = userName.replace('TEST_', '').replace(/\|/g, '').trim();
-        // Key Name: [USER_ID] | Name | Date
-        const name = `[${userId}] | ${cleanName} | ${expireDate}`; // 🌟 User ID ဖြင့် မှတ်သား
+        const name = `${cleanName} | ${expireDate}`;
         const limit = plan.gb * 1024 * 1024 * 1024;
         await client.put(`${OUTLINE_API_URL}/access-keys/${keyId}/name`, { name });
         await client.put(`${OUTLINE_API_URL}/access-keys/${keyId}/data-limit`, { limit: { bytes: limit } });
@@ -567,13 +482,30 @@ async function renewKeyForUser(keyId, plan, userName, userId) { // Renew တွ�
     } catch (e) { return null; }
 }
 
+// User List ကို Inline Check ခလုတ်ဖြင့် ပြသရန် ပြင်ဆင်သည်
 async function sendUserList(chatId) { 
     bot.sendMessage(chatId, "⏳ Connecting to Server...");
     try {
         const res = await client.get(`${OUTLINE_API_URL}/access-keys`);
         let message = "👥 **User List**\n\n";
-        res.data.accessKeys.forEach(k => { message += `🆔 \`${k.id}\` : ${k.name}\n👉 /manage_${k.id}\n\n`; });
-        bot.sendMessage(chatId, message, { parse_mode: 'Markdown' });
+        let inlineKeyboard = [];
+
+        res.data.accessKeys.forEach(k => { 
+            message += `🆔 \`${k.id}\` : ${k.name}\n`;
+            // Check ခလုတ်ကို inline တွင် ထည့်သွင်းသည်
+            inlineKeyboard.push([{ text: `[${k.id}] ${k.name}`, callback_data: `admin_check_id_${k.id}` }, { text: "🔎 Check", callback_data: `admin_check_id_${k.id}` }]);
+        });
+
+        // ကြီးမားသော Message များကို 2048 characters အထိ ဖြတ်တောက်ပြီး ပို့ပါမည် (Telegram limit)
+        if (message.length > 2000) {
+             bot.sendMessage(chatId, "👥 **User List** (Too Long)\n\n" + message.substring(0, 2000) + '...', { parse_mode: 'Markdown' });
+             // Inline Keyboard ကို သပ်သပ်ပို့မည်
+             bot.sendMessage(chatId, "🔎 Select a user to manage:", { reply_markup: { inline_keyboard: inlineKeyboard } });
+        } else {
+             // Message နှင့် Inline Keyboard ကို တွဲပို့မည်
+             bot.sendMessage(chatId, message, { parse_mode: 'Markdown', reply_markup: { inline_keyboard: inlineKeyboard } });
+        }
+
     } catch (e) {
         bot.sendMessage(chatId, `❌ **API Error!**\n\n${e.message}`);
     }
@@ -594,16 +526,9 @@ async function sendKeyDetails(chatId, keyId) {
 
         let status = "🟢 Active";
         if (limit > 0 && remaining <= 0) status = "🔴 Data Depleted";
-        if (limit <= 5000 && limit > 0) status = "🔴 Expired/Blocked";
-        
-        const displayRemaining = formatBytes(remaining > 0 ? remaining : 0);
-        const progressBarDisplay = getProgressBar(usage, limit);
-        const remainingDays = getDaysRemaining(expireDate);
-        
-        // Key Name မှ User ID ကို ဖြုတ်၍ ပြသရန်
-        const userIdMatch = cleanName.match(/^\[(\d+)\] \| (.*)/);
-        if (userIdMatch) { cleanName = userIdMatch[2]; }
+        if (limit <= 5000) status = "🔴 Expired/Blocked";
 
+        const remainingDays = getDaysRemaining(expireDate);
 
         const msg = `
 👮‍♂️ **User Management**
@@ -612,15 +537,14 @@ async function sendKeyDetails(chatId, keyId) {
 📡 **Status:** ${status}
 ⏳ **Remaining Day:** ${remainingDays}
 ⬇️ **Used:** ${formatBytes(usage)}
-🎁 **Remaining Data:** ${displayRemaining}
-📅 **Expire:** ${remainingDays}
+🎁 **Remaining Data:** ${formatBytes(remaining > 0 ? remaining : 0)}
+📅 **Expire:** ${expireDate}
 
-${progressBarDisplay}
-
-🔗 **KEY STRING:**
-\`${key.accessUrl}\`
+${getProgressBar(usage, limit)}
 `;
-        bot.sendMessage(chatId, msg, { parse_mode: 'Markdown', reply_markup: { inline_keyboard: [[{ text: "🗑️ DELETE", callback_data: `confirm_delete_${key.id}` }]] } });
+        const sentMsg = await bot.sendMessage(chatId, msg, { parse_mode: 'Markdown', reply_markup: { inline_keyboard: [[{ text: "🗑️ DELETE", callback_data: `confirm_delete_${key.id}` }]] } });
+        // Key Details Message ကို cache ထဲတွင် သိမ်းဆည်းသည်
+        adminMessageCache[key.id] = sentMsg.message_id; 
     } catch (e) {
         bot.sendMessage(chatId, `❌ **Error:** ${e.message}`);
     }
@@ -632,38 +556,27 @@ async function runGuardian() {
         const [kRes, mRes] = await Promise.all([client.get(`${OUTLINE_API_URL}/access-keys`), client.get(`${OUTLINE_API_URL}/metrics/transfer`)]);
         const keys = kRes.data.accessKeys;
         const usage = mRes.data.bytesTransferredByUserId || {};
-        const today = getMyanmarDate(0); // Use MM Time
+        const today = getMyanmarDate(0); 
         const now = Date.now();
         for (const k of keys) {
             const lim = k.dataLimit ? k.dataLimit.bytes : 0;
-            const isTestKey = k.name.includes("TEST_");
-            if (isTestKey) { // Test Key Logic
+            const isTestKey = k.name.startsWith("TEST_");
+            if (isTestKey) {
                 let testExpired = false;
                 if (k.name.includes('|')) { const d = k.name.split('|')[1].trim(); if (/^\d{4}-\d{2}-\d{2}$/.test(d) && d < today) testExpired = true; }
                 if (lim > 0 && (usage[k.id] || 0) >= lim) testExpired = true;
                 if (testExpired) { await client.delete(`${OUTLINE_API_URL}/access-keys/${k.id}`); continue; }
             }
-            if (!isTestKey) { // Premium Key Logic
-                
-                if (lim > 0 && lim <= 5000) { 
+            if (!isTestKey) {
+                if (lim > 0 && lim <= 5000) {
                     if (!blockedKeys[k.id]) { blockedKeys[k.id] = now; } 
                     else { if ((now - blockedKeys[k.id]) / (3600000) >= AUTO_DELETE_HOURS) { try { await client.delete(`${OUTLINE_API_URL}/access-keys/${k.id}`); delete blockedKeys[k.id]; bot.sendMessage(ADMIN_ID, `🗑️ **Auto-Deleted:** ${k.name}`); } catch (err) {} } }
                     continue;
                 }
-                
                 let block = false;
-                
-                // Duration Expired စစ်ခြင်း
                 if (k.name.includes('|')) { const d = k.name.split('|')[1].trim(); if (/^\d{4}-\d{2}-\d{2}$/.test(d) && d < today) block = true; }
-                
-                // Data Limit Expired စစ်ခြင်း (lim>5000 မှသာ)
                 if (lim > 5000 && (usage[k.id] || 0) >= lim) block = true;
-                
-                if (block) { 
-                    await client.put(`${OUTLINE_API_URL}/access-keys/${k.id}/data-limit`, { limit: { bytes: 1 } }); 
-                    blockedKeys[k.id] = now; 
-                    bot.sendMessage(ADMIN_ID, `🚫 **Blocked:** ${k.name}\n⏳ Will delete in 24h.`); 
-                }
+                if (block) { await client.put(`${OUTLINE_API_URL}/access-keys/${k.id}/data-limit`, { limit: { bytes: 1 } }); blockedKeys[k.id] = now; bot.sendMessage(ADMIN_ID, `🚫 **Blocked:** ${k.name}\n⏳ Will delete in 24h.`); }
             }
         }
     } catch (e) { console.error("Guardian Error"); }
@@ -691,10 +604,10 @@ CLEAN_USERNAME=${ADMIN_USERNAME//@/}
 sed -i "s|REPLACE_ADMIN_USER|$CLEAN_USERNAME|g" bot.js
 
 # Replace Payment Config
-sed -i "s|REPLACE_KPAY_NUM|$KPAY_NUM|g" bot.js
-sed -i "s|REPLACE_KPAY_NAME|$KPAY_NAME|g" bot.js
-sed -i "s|REPLACE_WAVE_NUM|$WAVE_NUM|g" bot.js
-sed -i "s|REPLACE_WAVE_NAME|$WAVE_NAME|g" bot.js
+sed -i "s|REPLACE_KPAY_INFO_TEXT|$KPAY_INFO_TEXT|g" bot.js
+sed -i "s|REPLACE_WAVE_INFO_TEXT|$WAVE_INFO_TEXT|g" bot.js
+sed -i "s|REPLACE_KPAY_NUM_FOR_COPY|$KPAY_COPY_DATA|g" bot.js
+sed -i "s|REPLACE_WAVE_NUM_FOR_COPY|$WAVE_COPY_DATA|g" bot.js
 
 # Replace Plan Configs
 sed -i "s|REPLACE_P1_GB|$P1_GB|g" bot.js; sed -i "s|REPLACE_P1_DAYS|$P1_DAYS|g" bot.js; sed -i "s|REPLACE_P1_PRICE|$P1_PRICE|g" bot.js
@@ -714,3 +627,6 @@ pm2 startup
 
 echo -e "\n${GREEN}✅ INSTALLATION SUCCESSFUL!${NC}"
 echo -e "${YELLOW}Your VPN Shop Bot is running with Myanmar Time!${NC}"
+echo -e "${CYAN}------------------------------------------------${NC}"
+echo -e "Admin: ${YELLOW}👥 User List${NC} ကို နှိပ်ပြီးနောက် User ID ဘေးမှ ${YELLOW}🔎 Check${NC} ခလုတ်ဖြင့် စစ်ဆေးနိုင်ပါပြီ။"
+echo -e "${CYAN}------------------------------------------------${NC}"
