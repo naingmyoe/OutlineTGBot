@@ -1,699 +1,1135 @@
 #!/bin/bash
 
-# အရောင်များ
+# Color Codes
+RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
-CYAN='\033[0;36m'
-RED='\033[0;31m'
-NC='\033[0m' # No Color
+NC='\033[0m'
 
-clear
-echo -e "${GREEN}===========================================${NC}"
-echo -e "${GREEN} 🚀 VPN SHOP BOT INSTALLER (MYANMAR TIME)  ${NC}"
-echo -e "${GREEN}===========================================${NC}"
+echo -e "${GREEN}=== VPN Shop Bot Installer (Pagination + Broadcast) ===${NC}"
 
-# --- 1. Bot & Server Config ---
-echo -e "\n${CYAN}--- [1/3] SERVER CONFIGURATION ---${NC}"
-read -p "1. Enter Telegram Bot Token: " BOT_TOKEN
-echo -e "${YELLOW}⚠️  Note: API URL must start with 'https://' and end with secret key.${NC}"
-read -p "2. Enter Outline API URL: " API_URL
-read -p "3. Enter Admin Telegram ID (Numeric only): " ADMIN_ID
-read -p "4. Enter Admin Username (e.g. @admin): " ADMIN_USERNAME
-
-# Input Validation
-if [[ -z "$BOT_TOKEN" || -z "$API_URL" || -z "$ADMIN_ID" ]]; then
-    echo -e "${RED}❌ ERROR: Bot Token, API URL, or Admin ID cannot be empty.${NC}"
-    exit 1
+# 1. Check Root
+if [ "$EUID" -ne 0 ]; then
+  echo -e "${RED}Please run as root${NC}"
+  exit
 fi
 
-echo -e ""
-# --- 2. Payment Configuration ---
-echo -e "${CYAN}--- [2/3] PAYMENT DETAILS ---${NC}"
-read -p "1. Kpay Phone Number: " KPAY_NUM
-read -p "   Kpay Account Name: " KPAY_NAME
-read -p "2. Wave Phone Number: " WAVE_NUM
-read -p "   Wave Account Name: " WAVE_NAME
-
-# Set payment variables for bot.js
-KPAY_INFO_TEXT="1️⃣ Kpay: $KPAY_NUM ($KPAY_NAME)"
-WAVE_INFO_TEXT="2️⃣ Wave: $WAVE_NUM ($WAVE_NAME)"
-KPAY_COPY_DATA="$KPAY_NUM"
-WAVE_COPY_DATA="$WAVE_NUM"
-
-echo -e ""
-# --- 3. Plan Customization ---
-echo -e "${CYAN}--- [3/3] PLAN CUSTOMIZATION ---${NC}"
-
-# PLAN 1
-echo -e "\n${GREEN}👉 Plan 1 Settings:${NC}"
-read -p "   GB Amount (e.g., 10): " P1_GB
-read -p "   Duration Days (e.g., 30): " P1_DAYS
-read -p "   Price (e.g., 3000 MMK): " P1_PRICE
-
-# PLAN 2
-echo -e "\n${GREEN}👉 Plan 2 Settings:${NC}"
-read -p "   GB Amount (e.g., 30): " P2_GB
-read -p "   Duration Days (e.g., 30): " P2_DAYS
-read -p "   Price (e.g., 7000 MMK): " P2_PRICE
-
-# PLAN 3
-echo -e "\n${GREEN}👉 Plan 3 Settings:${NC}"
-read -p "   GB Amount (e.g., 50): " P3_GB
-read -p "   Duration Days (e.g., 999): " P3_DAYS
-read -p "   Price (e.g., 12000 MMK): " P3_PRICE
-
-# Set Defaults (If inputs are empty)
-P1_GB=${P1_GB:-10}; P1_DAYS=${P1_DAYS:-30}; P1_PRICE=${P1_PRICE:-3,000 MMK}
-P2_GB=${P2_GB:-30}; P2_DAYS=${P2_DAYS:-30}; P2_PRICE=${P2_PRICE:-7,000 MMK}
-P3_GB=${P3_GB:-50}; P3_DAYS=${P3_DAYS:-999}; P3_PRICE=${P3_PRICE:-12,000 MMK}
-
-# ---------------------------------------------------------
-# SYSTEM SETUP
-# ---------------------------------------------------------
-echo -e "\n${YELLOW}🔄 Updating System & Installing Node.js...${NC}"
-if ! command -v curl &> /dev/null; then
-    apt update && apt install -y curl
-fi
+# 2. Update System & Install Dependencies
+echo -e "${YELLOW}Updating System...${NC}"
 apt update && apt upgrade -y
-curl -fsSL https://deb.nodesource.com/setup_18.x | sudo -E bash -
+apt install -y curl wget gnupg2 ca-certificates lsb-release nginx git
+
+# 3. Install Node.js 18
+echo -e "${YELLOW}Installing Node.js...${NC}"
+curl -fsSL https://deb.nodesource.com/setup_18.x | bash -
 apt install -y nodejs
 
-echo -e "${YELLOW}📁 Setting up Project Folder...${NC}"
-rm -rf /root/vpn-shop
+# 4. Setup Directory Structure
+echo -e "${YELLOW}Setting up directories...${NC}"
 mkdir -p /root/vpn-shop
-cd /root/vpn-shop
 
-echo -e "${YELLOW}📦 Installing Libraries...${NC}"
-npm init -y > /dev/null 2>&1
-npm install axios node-telegram-bot-api
-npm install pm2 -g
-
-# ---------------------------------------------------------
-# GENERATING BOT.JS
-# ---------------------------------------------------------
-echo -e "${YELLOW}📝 Generating bot.js...${NC}"
-
-touch bot.js
-cat > bot.js <<'END_OF_FILE'
+# 5. Create backend files (bot.js) with 10-KEY PAGINATION
+echo -e "${YELLOW}Creating Backend Files...${NC}"
+cat << 'EOF' > /root/vpn-shop/bot.js
+const express = require('express');
+const cors = require('cors');
+const bodyParser = require('body-parser');
+const TelegramBot = require('node-telegram-bot-api');
 const axios = require('axios');
 const https = require('https');
-const TelegramBot = require('node-telegram-bot-api');
 const fs = require('fs');
+const moment = require('moment-timezone');
+const { exec } = require('child_process');
 
-// ================================================================
-// ⚠️ CONFIGURATION
-// ================================================================
-const OUTLINE_API_URL = "REPLACE_API_URL"; 
-const TELEGRAM_TOKEN = "REPLACE_BOT_TOKEN"; 
-const ADMIN_ID = REPLACE_ADMIN_ID; 
+const app = express();
+app.use(cors());
+app.use(bodyParser.json());
 
-const AUTO_DELETE_HOURS = 24; 
-const TEST_PLAN = { days: 1, gb: 1 }; 
-
-const PLANS = {
-    'plan_1': { name: 'REPLACE_P1_DAYS Days - REPLACE_P1_GB GB', days: REPLACE_P1_DAYS, gb: REPLACE_P1_GB, price: 'REPLACE_P1_PRICE' },
-    'plan_2': { name: 'REPLACE_P2_DAYS Days - REPLACE_P2_GB GB', days: REPLACE_P2_DAYS, gb: REPLACE_P2_GB, price: 'REPLACE_P2_PRICE' },
-    'plan_3': { name: 'REPLACE_P3_DAYS Days - REPLACE_P3_GB GB', days: REPLACE_P3_DAYS, gb: REPLACE_P3_GB, price: 'REPLACE_P3_PRICE' }
-};
-
-const PAYMENT_INFO_TEXT = `
-💸 **ငွေပေးချေရန်:**
-REPLACE_KPAY_INFO_TEXT
-REPLACE_WAVE_INFO_TEXT
-
-⚠️ ငွေလွှဲပြီးပါက ပြေစာ (Screenshot) ပို့ပေးပါ။
-`;
-
-const KPAY_NUM = 'REPLACE_KPAY_NUM_FOR_COPY';
-const WAVE_NUM = 'REPLACE_WAVE_NUM_FOR_COPY';
-const CHECK_INTERVAL = 10000; 
-// ================================================================
-
-const agent = new https.Agent({ rejectUnauthorized: false, keepAlive: true });
-const client = axios.create({ httpsAgent: agent, timeout: 30000, headers: { 'Content-Type': 'application/json' } });
-const bot = new TelegramBot(TELEGRAM_TOKEN, { polling: true });
-
-const userStates = {}; 
-let blockedKeys = {}; 
+const CONFIG_FILE = 'config.json';
 const CLAIM_FILE = 'claimed_users.json';
+const BLOCKED_FILE = 'blocked_registry.json';
+const RESELLER_FILE = 'resellers.json';
+const ALL_USERS_FILE = 'all_users.json'; 
+
+let config = {};
+let bot = null;
 let claimedUsers = [];
-if (fs.existsSync(CLAIM_FILE)) { try { claimedUsers = JSON.parse(fs.readFileSync(CLAIM_FILE)); } catch(e) {} }
-const adminMessageCache = {};
+let blockedRegistry = {}; 
+let userStates = {};
+let resellers = [];
+let resellerSessions = {}; 
+let allUsers = []; 
 
-// --- HELPERS (MYANMAR TIME) ---
-function formatBytes(bytes) {
-    if (!bytes || bytes === 0) return '0 B';
-    const i = Math.floor(Math.log(bytes) / Math.log(1024));
-    return (bytes / Math.pow(1024, i)).toFixed(2) + ' ' + ['B', 'KB', 'MB', 'GB', 'TB'][i];
+// Prevent overlap
+let isGuardianRunning = false;
+
+const agent = new https.Agent({ rejectUnauthorized: false });
+const axiosClient = axios.create({ httpsAgent: agent, timeout: 10000, headers: { 'Content-Type': 'application/json' } });
+
+function loadConfig() {
+    try { if(fs.existsSync(CONFIG_FILE)) config = JSON.parse(fs.readFileSync(CONFIG_FILE)); } catch (e) {}
+    try { if(fs.existsSync(CLAIM_FILE)) claimedUsers = JSON.parse(fs.readFileSync(CLAIM_FILE)); } catch(e) {}
+    try { if(fs.existsSync(BLOCKED_FILE)) blockedRegistry = JSON.parse(fs.readFileSync(BLOCKED_FILE)); } catch(e) {}
+    try { if(fs.existsSync(RESELLER_FILE)) resellers = JSON.parse(fs.readFileSync(RESELLER_FILE)); } catch(e) {}
+    try { if(fs.existsSync(ALL_USERS_FILE)) allUsers = JSON.parse(fs.readFileSync(ALL_USERS_FILE)); } catch(e) {}
+}
+loadConfig();
+
+// --- SERVER HELPER FUNCTIONS ---
+function getServers() {
+    if (!config.api_urls) return [];
+    return config.api_urls.map(s => {
+        if (typeof s === 'string') return { name: "Server", url: s };
+        return s;
+    });
 }
 
-// 🔥 Myanmar Time (YYYY-MM-DD)
-function getMyanmarDate(offsetDays = 0) {
-    const date = new Date();
-    date.setDate(date.getDate() + parseInt(offsetDays));
-    return date.toLocaleDateString('en-CA', { timeZone: 'Asia/Yangon' });
-}
-
-function getDaysRemaining(dateString) {
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(dateString)) return "Unknown";
-    const todayStr = getMyanmarDate(0); // Use Myanmar Today
-    const today = new Date(todayStr);
-    const target = new Date(dateString);
-    const diffTime = target - today;
-    const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
-    return diffDays > 0 ? `${diffDays} Days` : "Expired";
-}
-
-function getProgressBar(used, total) {
-    if (total === 0) return "ERROR";
-    const percentage = Math.min((used / total) * 100, 100);
-    const totalLength = 10; 
-    const filledLength = Math.round((percentage / 100) * totalLength);
-    const bar = '█'.repeat(filledLength) + '░'.repeat(totalLength - filledLength);
-    return `[${bar}] ${percentage.toFixed(1)}%`;
-}
-
-function sanitizeText(text) {
-    // Escape all potential Markdown V1 special characters: _ * ` [ ] ( ) ~ > # + - = | { } . !
-    if (!text) return '';
-    return text.replace(/([_*\[\]()~`>#+\-=|{}.!])/g, '\\$1');
-}
-
-// ================================================================
-// 🎨 MAIN MENU LAYOUT (Menu ကို ပြန်လည်ဖွဲ့စည်းသည်)
-// ================================================================
-const baseKeyboard = [
-    [{ text: "🆓 အစမ်း Key (1GB)(1Day)" }, { text: "🛒 VPN Key ဝယ်ရန်" }],
-    [{ text: "🔑 VPN KEY ပြရန်" }, { text: "👤 Package စစ်ရန်" }], // Key URL နှင့် Package Status အတွက် ခွဲထုတ်လိုက်သည်
-    [{ text: "🆘 ဆက်သွယ်ရန်" }]
-];
-
-// Payment Info တွင် Copy ခလုတ် ထည့်ရန် Function
-function getPaymentOptions() {
-    return {
-        parse_mode: 'Markdown',
-        reply_markup: {
-            inline_keyboard: [
-                [{ text: "1️⃣ Kpay နံပါတ် ကူးယူရန်", callback_data: `copy_${KPAY_NUM}` }],
-                [{ text: "2️⃣ WavePay နံပါတ် ကူးယူရန်", callback_data: `copy_${WAVE_NUM}` }]
-            ]
+function getServerKeyboard(callbackPrefix) {
+    const servers = getServers();
+    let keyboard = [];
+    let row = [];
+    servers.forEach((srv, index) => {
+        let sName = srv.name || `Server ${index + 1}`;
+        row.push({ text: `🖥️ ${sName}`, callback_data: `${callbackPrefix}_${index}` });
+        if (row.length === 2) {
+            keyboard.push(row);
+            row = [];
         }
+    });
+    if (row.length > 0) keyboard.push(row);
+    return keyboard;
+}
+
+async function findKeyInAllServers(keyIdOrName, isName = false) {
+    const servers = getServers();
+    for (const srv of servers) {
+        try {
+            const serverUrl = srv.url;
+            const [kRes, mRes] = await Promise.all([
+                axiosClient.get(`${serverUrl}/access-keys`),
+                axiosClient.get(`${serverUrl}/metrics/transfer`)
+            ]);
+            let key;
+            if (isName) {
+                key = kRes.data.accessKeys.find(k => k.name.includes(keyIdOrName));
+            } else {
+                key = kRes.data.accessKeys.find(k => String(k.id) === String(keyIdOrName));
+            }
+            if (key) {
+                return { key, metrics: mRes.data, serverUrl, serverName: srv.name };
+            }
+        } catch (e) { console.error(`Error checking server ${srv.url}:`, e.message); }
+    }
+    return null;
+}
+
+async function getAllKeysFromAllServers(filter = null) {
+    const servers = getServers();
+    let allKeys = [];
+    for (const srv of servers) {
+        try {
+            const res = await axiosClient.get(`${srv.url}/access-keys`);
+            let keys = res.data.accessKeys;
+            if(filter) keys = keys.filter(filter);
+            keys = keys.map(k => ({ ...k, _serverUrl: srv.url, _serverName: srv.name }));
+            allKeys = allKeys.concat(keys);
+        } catch (e) {}
+    }
+    return allKeys;
+}
+
+async function getKeysFromSpecificServer(index) {
+    const servers = getServers();
+    if (!servers[index]) return [];
+    const srv = servers[index];
+    try {
+        const res = await axiosClient.get(`${srv.url}/access-keys`);
+        return res.data.accessKeys.map(k => ({ ...k, _serverUrl: srv.url, _serverName: srv.name }));
+    } catch (e) { return []; }
+}
+
+async function createKeyOnServer(serverIndex, name, limitBytes) {
+    const servers = getServers();
+    if (!servers[serverIndex]) throw new Error("Invalid Server Index");
+    const targetServer = servers[serverIndex];
+    const res = await axiosClient.post(`${targetServer.url}/access-keys`);
+    await axiosClient.put(`${targetServer.url}/access-keys/${res.data.id}/name`, { name: name });
+    await axiosClient.put(`${targetServer.url}/access-keys/${res.data.id}/data-limit`, { limit: { bytes: limitBytes } });
+    return { ...res.data, _serverUrl: targetServer.url, _serverName: targetServer.name };
+}
+
+// --- API ROUTES ---
+app.get('/api/config', (req, res) => { loadConfig(); res.json({ ...config, resellers }); });
+
+app.post('/api/update-config', (req, res) => {
+    try {
+        const { resellers: newResellers, ...newConfig } = req.body;
+        config = { ...config, ...newConfig };
+        fs.writeFileSync(CONFIG_FILE, JSON.stringify(config, null, 4));
+        if(newResellers) { resellers = newResellers; fs.writeFileSync(RESELLER_FILE, JSON.stringify(resellers, null, 4)); }
+        res.json({ success: true, config: config });
+        setTimeout(() => { loadConfig(); startBot(); }, 1000);
+    } catch (error) { res.status(500).json({ success: false }); }
+});
+
+app.post('/api/change-port', (req, res) => {
+    const newPort = req.body.port;
+    if(!newPort || isNaN(newPort)) return res.status(400).json({error: "Invalid Port"});
+    const nginxConfig = `server { listen ${newPort}; server_name _; root /var/www/html; index index.html; location / { try_files $uri $uri/ =404; } }`;
+    try { fs.writeFileSync('/etc/nginx/sites-available/default', nginxConfig); config.panel_port = parseInt(newPort); fs.writeFileSync(CONFIG_FILE, JSON.stringify(config, null, 4)); exec('systemctl reload nginx', (error) => { if (error) { return res.status(500).json({error: "Failed to reload Nginx"}); } res.json({ success: true, message: `Port changed to ${newPort}` }); }); } catch (err) { res.status(500).json({ error: "Failed to write config" }); }
+});
+app.listen(3000, () => console.log('✅ Sync Server running on Port 3000'));
+
+if (config.bot_token && config.api_urls && config.api_urls.length > 0) startBot();
+
+function startBot() {
+    if(bot) { try { bot.stopPolling(); } catch(e){} }
+    if(!config.bot_token) return;
+
+    console.log("🚀 Starting Bot...");
+    bot = new TelegramBot(config.bot_token, { polling: true });
+    
+    const ADMIN_IDS = config.admin_id ? config.admin_id.split(',').map(id => id.trim()) : [];
+    const WELCOME_MSG = config.welcome_msg || "👋 Welcome to VPN Shop!\nမင်္ဂလာပါ VPN Shop မှ ကြိုဆိုပါတယ်။";
+    const TRIAL_ENABLED = config.trial_enabled !== false;
+    const TRIAL_DAYS = parseInt(config.trial_days) || 1;
+    const TRIAL_GB = parseFloat(config.trial_gb) || 1;
+    
+    const BTN = {
+        trial: (config.buttons && config.buttons.trial) ? config.buttons.trial : "🆓 Free Trial (အစမ်းသုံးရန်)",
+        buy: (config.buttons && config.buttons.buy) ? config.buttons.buy : "🛒 Buy Key (ဝယ်ယူရန်)",
+        mykey: (config.buttons && config.buttons.mykey) ? config.buttons.mykey : "🔑 My Key (မိမိ Key ရယူရန်)",
+        info: (config.buttons && config.buttons.info) ? config.buttons.info : "👤 Account Info (အကောင့်စစ်ရန်)",
+        support: (config.buttons && config.buttons.support) ? config.buttons.support : "🆘 Support (ဆက်သွယ်ရန်)",
+        reseller: (config.buttons && config.buttons.reseller) ? config.buttons.reseller : "🤝 Reseller Login",
+        resell_buy: (config.buttons && config.buttons.resell_buy) ? config.buttons.resell_buy : "🛒 Buy Stock",
+        resell_create: (config.buttons && config.buttons.resell_create) ? config.buttons.resell_create : "📦 Create User Key",
+        resell_users: (config.buttons && config.buttons.resell_users) ? config.buttons.resell_users : "👥 My Users",
+        resell_extend: (config.buttons && config.buttons.resell_extend) ? config.buttons.resell_extend : "⏳ Extend User",
+        resell_logout: (config.buttons && config.buttons.resell_logout) ? config.buttons.resell_logout : "🔙 Logout Reseller"
     };
-}
 
+    function formatAccessUrl(url, serverUrl) {
+        if (!url) return url;
+        try {
+            const urlObj = new URL(url);
+            const originalIp = urlObj.hostname;
+            if (config.domain_map && config.domain_map.length > 0) {
+                const mapping = config.domain_map.find(m => m.ip === originalIp);
+                if (mapping && mapping.domain) return url.replace(originalIp, mapping.domain);
+            }
+            if (config.domain) return url.replace(originalIp, config.domain);
+            return url;
+        } catch (e) { return url; }
+    }
+    
+    function isAdmin(chatId) { return ADMIN_IDS.includes(String(chatId)); }
+    function formatBytes(bytes) { if (!bytes || bytes === 0) return '0 B'; const i = Math.floor(Math.log(bytes) / Math.log(1024)); return (bytes / Math.pow(1024, i)).toFixed(2) + ' ' + ['B', 'KB', 'MB', 'GB', 'TB'][i]; }
+    function getMyanmarDate(offsetDays = 0) { return moment().tz("Asia/Yangon").add(offsetDays, 'days').format('YYYY-MM-DD'); }
+    function isExpired(dateString) { if (!/^\d{4}-\d{2}-\d{2}$/.test(dateString)) return false; const today = moment().tz("Asia/Yangon").startOf('day'); const expire = moment.tz(dateString, "YYYY-MM-DD", "Asia/Yangon").startOf('day'); return expire.isBefore(today); }
+    function getDaysRemaining(dateString) { if (!/^\d{4}-\d{2}-\d{2}$/.test(dateString)) return "Unknown"; const today = moment().tz("Asia/Yangon").startOf('day'); const expire = moment.tz(dateString, "YYYY-MM-DD", "Asia/Yangon").startOf('day'); const diff = expire.diff(today, 'days'); return diff >= 0 ? `${diff} Days` : "Expired"; }
+    function sanitizeText(text) { if (!text) return ''; return text.replace(/([_*\[\]()~`>#+\-=|{}.!])/g, '\\$1'); }
 
-// 🤖 COMMANDS & MENU HANDLERS
-bot.onText(/\/start/, (msg) => {
-    const userId = msg.chat.id;
-    console.log(`[DEBUG] User ID: ${userId} | Admin ID Configured: ${ADMIN_ID}`);
-
-    let currentKeyboard = baseKeyboard;
-
-    if (String(userId) === String(ADMIN_ID)) {
-        bot.sendMessage(userId, "👮‍♂️ **Admin Detected**\nAdmin Panel ကို Key Board တွင် ထည့်သွင်းလိုက်ပါပြီ။", { parse_mode: 'Markdown' });
-        currentKeyboard = [[{ text: "👮‍♂️ Admin Panel" }], ...baseKeyboard]; 
+    function getMainMenu(userId) {
+        let kb = []; let row1 = [];
+        if (TRIAL_ENABLED) row1.push({ text: BTN.trial });
+        row1.push({ text: BTN.buy }); kb.push(row1);
+        kb.push([{ text: BTN.mykey }, { text: BTN.info }]); 
+        kb.push([{ text: BTN.reseller }, { text: BTN.support }]);
+        if (isAdmin(userId)) kb.unshift([{ text: "👮‍♂️ Admin Panel" }]);
+        return kb;
     }
 
-    const opts = {
-        reply_markup: {
-            keyboard: currentKeyboard,
-            resize_keyboard: true,
-            one_time_keyboard: false
+    function getResellerMenu(username, balance) {
+        return [
+            [{ text: `${BTN.resell_buy} (${balance} Ks)` }],
+            [{ text: BTN.resell_create }, { text: BTN.resell_extend }],
+            [{ text: BTN.resell_users }, { text: BTN.resell_logout }]
+        ];
+    }
+
+    bot.onText(/\/start/, (msg) => { 
+        const userId = msg.chat.id;
+        if (!allUsers.includes(userId)) {
+            allUsers.push(userId);
+            try { fs.writeFileSync(ALL_USERS_FILE, JSON.stringify(allUsers)); } catch(e){}
         }
-    };
+        delete userStates[userId];
+        delete resellerSessions[userId];
+        bot.sendMessage(userId, WELCOME_MSG, { reply_markup: { keyboard: getMainMenu(userId), resize_keyboard: true } }); 
+    });
 
-    bot.sendMessage(userId, "👋 မင်္ဂလာပါ VPN Shop မှ ကြိုဆိုပါတယ်။\nမိမိလိုအပ်သော ဝန်ဆောင်မှုကို အောက်တွင် ရွေးချယ်နိုင်ပါသည်။", opts);
-});
-
-// Admin Panel Command (Menu Button)
-bot.onText(/^(👮‍♂️ Admin Panel)$/, (msg) => {
-    if (String(msg.chat.id) === String(ADMIN_ID)) {
-        const opts = {
-            reply_markup: {
-                inline_keyboard: [
-                    [{ text: "👥 User List", callback_data: 'admin_list_users' }],
-                    [{ text: "📊 Check Server", callback_data: 'check_status' }]
-                ]
-            }
-        };
-        bot.sendMessage(msg.chat.id, "👮‍♂️ **Admin Control Panel**", opts);
-    }
-});
-
-// Admin Panel Command (Legacy /admin)
-bot.onText(/\/admin/, (msg) => {
-    if (String(msg.chat.id) === String(ADMIN_ID)) {
-        const opts = {
-            reply_markup: {
-                inline_keyboard: [
-                    [{ text: "👥 User List", callback_data: 'admin_list_users' }],
-                    [{ text: "📊 Check Server", callback_data: 'check_status' }]
-                ]
-            }
-        };
-        bot.sendMessage(msg.chat.id, "👮‍♂️ **Admin Control Panel**", opts);
-    }
-});
-
-// --- MENU BUTTON LOGIC MAPPING ---
-
-// 1. FREE TEST KEY
-bot.onText(/^(🆓 အစမ်း Key \(1GB\)\(1Day\))$/, async (msg) => {
-    const chatId = msg.chat.id;
-    const userFullName = `${msg.from.first_name} ${msg.from.last_name || ''}`.trim();
-    // 🔔 Username ကို ရယူသည်
-    const username = msg.from.username ? `#${msg.from.username}` : ''; 
-
-    if (claimedUsers.includes(chatId)) { 
-        return bot.sendMessage(chatId, "⚠️ **Sorry!**\nမိတ်ဆွေ Test Key ထုတ်ယူပြီးသား ဖြစ်ပါသည်။\nPremium Plan ကို ဝယ်ယူအသုံးပြုပေးပါ။", { parse_mode: 'Markdown' }); 
-    }
-    
-    bot.sendMessage(chatId, "⏳ Creating Test Key...");
-    try {
-        const expireDate = getMyanmarDate(TEST_PLAN.days); 
-        // 🔑 Key Name အသစ်: Full Name + #Username + Expire Date
-        const name = `TEST_${userFullName.replace(/\|/g, '').trim()} ${username} | ${expireDate}`; 
-        const limit = TEST_PLAN.gb * 1024 * 1024 * 1024;
-        const res = await client.post(`${OUTLINE_API_URL}/access-keys`);
-        await client.put(`${OUTLINE_API_URL}/access-keys/${res.data.id}/name`, { name });
-        await client.put(`${OUTLINE_API_URL}/access-keys/${res.data.id}/data-limit`, { limit: { bytes: limit } });
-        claimedUsers.push(chatId); fs.writeFileSync(CLAIM_FILE, JSON.stringify(claimedUsers));
-        bot.sendMessage(chatId, `🎉 **Free Trial Created!**\n\n👤 Name: ${userFullName} ${username}\n📦 Limit: 1 GB\n📅 Expire: 1 Day\n\n🔗 **Key:**\n\`${res.data.accessUrl}\``, { parse_mode: 'Markdown' }); 
-    } catch (e) { bot.sendMessage(chatId, "❌ Error creating test key."); }
-});
-
-// 2. BUY PREMIUM KEY
-bot.onText(/^(🛒 VPN Key ဝယ်ရန်)$/, (msg) => {
-    const keyboard = Object.keys(PLANS).map(key => [{ text: `${PLANS[key].name} - ${PLANS[key].price}`, callback_data: `select_${key}_NEW_0` }]);
-    bot.sendMessage(msg.chat.id, "📅 **မိမိဝယ်ယူလိုသော Plan ကို ရွေးချယ်ပါ:**", { parse_mode: 'Markdown', reply_markup: { inline_keyboard: keyboard } });
-});
-
-// 3. KEY URL သက်သက် ပြရန် (🔑 VPN KEY ပြရန်)
-bot.onText(/^(🔑 VPN KEY ပြရန်)$/, async (msg) => { 
-    const userFullName = `${msg.from.first_name} ${msg.from.last_name || ''}`.trim();
-    const username = msg.from.username ? `#${msg.from.username}` : ''; 
-    bot.sendMessage(msg.chat.id, "🔎 Retrieving Key URL...");
-    await retrieveKeyUrlOnly(msg.chat.id, userFullName, username); // Function အသစ်ကို ခေါ်သည်
-});
-
-// 4. Detailed Status ပြရန် (👤 Package စစ်ရန်)
-bot.onText(/^(👤 Package စစ်ရန်)$/, async (msg) => { 
-    const userFullName = `${msg.from.first_name} ${msg.from.last_name || ''}`.trim();
-    bot.sendMessage(msg.chat.id, "🔎 Checking Account Status...");
-    await checkUserStatus(msg.chat.id, userFullName); 
-});
-
-// 5. CONTACT ADMIN
-bot.onText(/^(🆘 ဆက်သွယ်ရန်)$/, (msg) => {
-    bot.sendMessage(msg.chat.id, "🆘 Admin သို့ တိုက်ရိုက်ဆက်သွယ်ရန် အောက်ပါခလုတ်ကို နှိပ်ပါ။", {
-        reply_markup: { inline_keyboard: [[{ text: "💬 Chat with Admin", url: `https://t.me/REPLACE_ADMIN_USER` }]]
-    }});
-});
-
-// 🤖 CALLBACK QUERY
-bot.on('callback_query', async (callbackQuery) => {
-    const msg = callbackQuery.message;
-    const chatId = msg.chat.id;
-    const data = callbackQuery.data;
-    const userFullName = `${callbackQuery.from.first_name} ${callbackQuery.from.last_name || ''}`.trim();
-    
-    // Copy Command Handler
-    if (data.startsWith('copy_')) {
-        const textToCopy = data.substring(5); 
-        bot.answerCallbackQuery(callbackQuery.id, { 
-             text: `✅ ${textToCopy} နံပါတ် ကူးယူပြီးပါပြီ။`, 
-             show_alert: false 
-        });
-        return;
-    }
-
-    if (data === 'check_status') { bot.sendMessage(chatId, "🔎 Checking..."); await checkUserStatus(chatId, userFullName); } 
-    
-    // Admin Check ID Callback
-    if (data.startsWith('admin_check_id_')) {
-        const keyId = data.split('_')[3];
-        await sendKeyDetails(chatId, keyId);
-        return;
-    }
-
-
-    if (data.startsWith('select_')) {
-        const realPlanKey = data.match(/plan_\d+/)[0]; 
-        const realType = data.includes('RENEW') ? 'RENEW' : 'NEW';
-        const realKeyId = data.split('_').pop();
-        userStates[chatId] = { status: 'WAITING_SLIP', plan: PLANS[realPlanKey], name: userFullName, type: realType, renewKeyId: realKeyId }; 
+    bot.on('message', async (msg) => {
+        const chatId = msg.chat.id;
+        const text = msg.text;
         
-        bot.sendMessage(chatId, `✅ **Selected:** ${PLANS[realPlanKey].name}\n💰 **Price:** ${PLANS[realPlanKey].price}\n\n${PAYMENT_INFO_TEXT}`, getPaymentOptions());
-    }
+        if (!text) return; 
 
-    if (data.startsWith('renew_start_')) {
-        const keyIdToRenew = data.split('_')[2];
-        const keyboard = Object.keys(PLANS).map(key => [{ text: `${PLANS[key].name} - ${PLANS[key].price}`, callback_data: `select_${key}_RENEW_${keyIdToRenew}` }]);
-        bot.sendMessage(chatId, "🔄 **Renew လုပ်မည့် Plan ကို ရွေးချယ်ပါ:**", { parse_mode: 'Markdown', reply_markup: { inline_keyboard: keyboard } });
-    }
-
-    // Admin Logic
-    if (String(chatId) === String(ADMIN_ID)) {
-        if (data === 'admin_list_users') await sendUserList(chatId);
-        
-        if (data.startsWith('approve_')) {
-            const buyerId = data.split('_')[1];
-            if (userStates[buyerId]) {
-                const { plan, name, type, renewKeyId } = userStates[buyerId];
-                bot.editMessageCaption("✅ Approved", { chat_id: ADMIN_ID, message_id: msg.message_id });
-                let resultKey;
-                if (type === 'RENEW') resultKey = await renewKeyForUser(renewKeyId, plan, name);
-                else resultKey = await createKeyForUser(buyerId, plan, name);
-                if (resultKey) {
-                    bot.sendMessage(buyerId, `🎉 **Success!**\n\n👤 Name: ${name}\n📅 Expire: ${resultKey.expireDate}\n\n🔗 **Key:**\n\`${resultKey.accessUrl}\``, { parse_mode: 'Markdown' });
-                    delete userStates[buyerId];
+        if (userStates[chatId]) {
+            const state = userStates[chatId];
+            
+            // --- ADMIN BROADCAST ---
+            if (state.status === 'ADMIN_BROADCAST_MSG') {
+                if(!isAdmin(chatId)) return;
+                const msgText = text;
+                bot.sendMessage(chatId, `🚀 **Broadcasting to ${allUsers.length} users...**`, { parse_mode: 'Markdown' });
+                let successCount = 0; let failCount = 0;
+                for (const uid of allUsers) {
+                    try {
+                        await bot.sendMessage(uid, `📢 **ANNOUNCEMENT**\n\n${msgText}`, { parse_mode: 'Markdown' });
+                        successCount++;
+                    } catch (e) { failCount++; }
+                    await new Promise(r => setTimeout(r, 50)); 
                 }
+                bot.sendMessage(chatId, `✅ **Broadcast Completed**\n\n✅ Success: ${successCount}\n❌ Failed/Blocked: ${failCount}`, { 
+                    reply_markup: { keyboard: getMainMenu(chatId), resize_keyboard: true } 
+                });
+                delete userStates[chatId];
+                return;
             }
-        }
 
-        // Delete Confirmation Step
-        if (data.startsWith('confirm_delete_')) {
-            const keyId = data.split('_')[2];
-            adminMessageCache[keyId] = msg.message_id; 
-            
-            bot.sendMessage(chatId, `⚠️ Delete Key ID: ${keyId}?`, { reply_markup: { inline_keyboard: [[{ text: "✅ YES", callback_data: `do_delete_${keyId}` }, { text: "❌ NO", callback_data: `cancel_delete` }]] } });
-        }
-        
-        // Final Delete Step
-        if (data.startsWith('do_delete_')) {
-            const keyId = data.split('_')[2];
-            await client.delete(`${OUTLINE_API_URL}/access-keys/${keyId}`); 
-            bot.sendMessage(chatId, "✅ Deleted.");
-            
-            bot.deleteMessage(chatId, msg.message_id).catch(e => console.error("Error deleting confirmation msg:", e.message));
-            
-            if (adminMessageCache[keyId]) {
-                bot.deleteMessage(chatId, adminMessageCache[keyId]).catch(e => console.error("Error deleting key details msg:", e.message));
-                delete adminMessageCache[keyId];
+            if (state.status === 'RESELLER_LOGIN_USER') {
+                userStates[chatId].username = text.trim();
+                userStates[chatId].status = 'RESELLER_LOGIN_PASS';
+                return bot.sendMessage(chatId, "🔑 Enter **Password**:", { parse_mode: 'Markdown' });
             }
-        }
-        
-        if (data === 'cancel_delete') bot.deleteMessage(chatId, msg.message_id);
-        
-        if (data.startsWith('reject_')) { bot.sendMessage(data.split('_')[1], "❌ Rejected."); bot.editMessageCaption("❌ Rejected", { chat_id: ADMIN_ID, message_id: msg.message_id }); }
-    }
-});
-
-bot.on('photo', async (msg) => {
-    const chatId = msg.chat.id;
-    if (userStates[chatId] && userStates[chatId].status === 'WAITING_SLIP') {
-        const { plan, name, type } = userStates[chatId];
-        bot.sendMessage(chatId, "📩 Slip Received.");
-        bot.sendPhoto(ADMIN_ID, msg.photo[msg.photo.length - 1].file_id, {
-            caption: `💰 Order: ${name} | ${plan.name}\nType: ${type === 'RENEW' ? '🔄 RENEW' : '🛒 NEW'}`,
-            reply_markup: { inline_keyboard: [[{ text: "✅ Approve", callback_data: `approve_${chatId}` }, { text: "❌ Reject", callback_data: `reject_${chatId}` }]]
-        }});
-    }
-});
-
-// Admin Key Detail Management
-bot.onText(/\/manage[ _](.+)/, async (msg, match) => { 
-    if (String(msg.chat.id) === String(ADMIN_ID)) await sendKeyDetails(msg.chat.id, match[1].trim()); 
-});
-
-// --- CORE FUNCTIONS (USER VIEW) ---
-
-// 🔑 VPN KEY ပြရန် အတွက် Function (Key URL သက်သက်သာ ပြမည်)
-async function retrieveKeyUrlOnly(chatId, userFullName, username) {
-    try {
-        const [kRes] = await Promise.all([client.get(`${OUTLINE_API_URL}/access-keys`)]);
-        // Key ကို Full Name ဖြင့် ရှာသည်
-        const myKey = kRes.data.accessKeys.find(k => k.name.includes(userFullName)); 
-        
-        if (!myKey) {
-            return bot.sendMessage(chatId, "❌ **Key Not Found!**\nဝယ်ယူထားသော Key မရှိသေးပါ၊ သို့မဟုတ် Name မကိုက်ညီပါ။", { parse_mode: 'Markdown' });
-        }
-        
-        let cleanName = myKey.name; 
-        if (myKey.name.includes('|')) { const parts = myKey.name.split('|'); cleanName = parts[0].trim(); }
-
-        const msg = `
-🔑 **Key URL:**
-\`${sanitizeText(myKey.accessUrl)}\`
-
-👤 Name: ${sanitizeText(cleanName)}
-${myKey.name.startsWith("TEST_") ? "⚠️ (Trial Key ဖြစ်ပါသည်။)" : "✅ (Premium Key ဖြစ်ပါသည်။)"}
-`;
-        
-        bot.sendMessage(chatId, msg, { parse_mode: 'Markdown' });
-    } catch (e) {
-        console.error("Retrieve Key URL Only Error:", e);
-        bot.sendMessage(chatId, "⚠️ Server Error retrieving key. Please contact Admin."); 
-    }
-}
-
-
-// 👤 Package စစ်ရန် အတွက် Function (Detailed Status ပြမည်)
-async function checkUserStatus(chatId, userName) { 
-    try {
-        const [kRes, mRes] = await Promise.all([client.get(`${OUTLINE_API_URL}/access-keys`), client.get(`${OUTLINE_API_URL}/metrics/transfer`)]);
-        const myKey = kRes.data.accessKeys.find(k => k.name.includes(userName)); 
-        
-        if (!myKey) return bot.sendMessage(chatId, "❌ **Account Not Found**\n(Key not created yet, or Name mismatch? Contact Admin)");
-        
-        const used = mRes.data.bytesTransferredByUserId[myKey.id] || 0;
-        const limit = myKey.dataLimit ? myKey.dataLimit.bytes : 0;
-        const remaining = limit - used;
-        
-        let cleanName = myKey.name; let expireDate = "Unknown";
-        if (myKey.name.includes('|')) { const parts = myKey.name.split('|'); cleanName = parts[0].trim(); expireDate = parts[1].trim(); }
-
-        const safeCleanName = sanitizeText(cleanName);
-
-        let status = "🟢 Active";
-        if (limit > 0 && remaining <= 0) { status = "🔴 Data Depleted"; }
-        if (limit <= 5000) { status = "🔴 Expired/Blocked"; }
-        if (myKey.name.startsWith("TEST_")) status += " (TRIAL)";
-
-        const remainingDays = getDaysRemaining(expireDate);
-        const keyId = myKey.id; 
-
-        const msg = `
-👤 **Name:** ${safeCleanName}
-📡 **Status:** ${status}
-⏳ **Remaining Day:** ${remainingDays}
-⬇️ **Used:** ${formatBytes(used)}
-🎁 **Remaining Data:** ${formatBytes(remaining > 0 ? remaining : 0)}
-📅 **Expire:** ${expireDate}
-
-${getProgressBar(used, limit)}
-`;
-        let inlineKeyboard = [];
-        
-        if (limit <= 5000 && !myKey.name.startsWith("TEST_")) {
-            inlineKeyboard.push([{ text: "🔄 RENEW KEY NOW", callback_data: `renew_start_${keyId}` }]);
-        } else if (limit <= 5000 && myKey.name.startsWith("TEST_")) {
-             inlineKeyboard.push([{ text: "🛒 Upgrade to Premium", callback_data: `buy_vpn` }]);
-        }
-        
-        const opts = { parse_mode: 'Markdown', reply_markup: { inline_keyboard: inlineKeyboard } };
-        
-        bot.sendMessage(chatId, msg, opts);
-    } catch (e) { 
-        console.error(e);
-        bot.sendMessage(chatId, "⚠️ Server Error. Please contact Admin."); 
-    }
-}
-
-
-// Key Creation (Uses Full Name and #Username)
-async function createKeyForUser(userId, plan, userName) {
-    try {
-        // 🔔 Username ကို ရယူသည် (လက်ရှိ userStates ထဲတွင် username မပါဝင်သော်လည်း၊ ပုံမှန်အားဖြင့် Premium Key ဝယ်သူသည် username ပေးနိုင်သည်ဟု ယူဆသည်)
-        let username = '';
-        if (userStates[userId] && userStates[userId].username) {
-             username = `#${userStates[userId].username}`;
-        }
-        
-        const expireDate = getMyanmarDate(plan.days); 
-        // 🔑 Key Name အသစ်: Full Name + #Username + Expire Date
-        const name = `${userName.replace(/\|/g, '').trim()} ${username} | ${expireDate}`; 
-        const limit = plan.gb * 1024 * 1024 * 1024;
-        const res = await client.post(`${OUTLINE_API_URL}/access-keys`);
-        await client.put(`${OUTLINE_API_URL}/access-keys/${res.data.id}/name`, { name });
-        await client.put(`${OUTLINE_API_URL}/access-keys/${res.data.id}/data-limit`, { limit: { bytes: limit } });
-        return { accessUrl: res.data.accessUrl, expireDate };
-    } catch (e) { return null; }
-}
-
-async function renewKeyForUser(keyId, plan, userName) {
-    try {
-        // Renew လုပ်သည့်အခါ မူလ Key Name မှ #Username ကို ပြန်ရှာရန် လိုအပ်သည်
-        let username = '';
-        const kRes = await client.get(`${OUTLINE_API_URL}/access-keys`);
-        const oldKey = kRes.data.accessKeys.find(k => String(k.id) === String(keyId));
-        if (oldKey && oldKey.name) {
-            const match = oldKey.name.match(/#(\w+)/);
-            if (match) username = match[0]; // #username ကို ပြန်ရသည်
-        }
-
-        const expireDate = getMyanmarDate(plan.days); 
-        const cleanName = userName.replace('TEST_', '').replace(/\|/g, '').trim();
-        // 🔑 Key Name အသစ်: Full Name + #Username + Expire Date
-        const name = `${cleanName} ${username} | ${expireDate}`;
-        const limit = plan.gb * 1024 * 1024 * 1024;
-        await client.put(`${OUTLINE_API_URL}/access-keys/${keyId}/name`, { name });
-        await client.put(`${OUTLINE_API_URL}/access-keys/${keyId}/data-limit`, { limit: { bytes: limit } });
-        if (blockedKeys[keyId]) delete blockedKeys[keyId];
-        const key = kRes.data.accessKeys.find(k => String(k.id) === String(keyId));
-        return { accessUrl: key.accessUrl, expireDate };
-    } catch (e) { return null; }
-}
-
-async function sendUserList(chatId) { 
-    bot.sendMessage(chatId, "⏳ Connecting to Server...");
-    try {
-        const res = await client.get(`${OUTLINE_API_URL}/access-keys`);
-        let message = "👥 **User List**\n\n";
-        let inlineKeyboard = [];
-
-        res.data.accessKeys.forEach(k => { 
-            const safeName = sanitizeText(k.name);
-            message += `🆔 \`${k.id}\` : ${safeName}\n`;
-            inlineKeyboard.push([{ text: `[${k.id}] ${safeName}`.substring(0, 40), callback_data: `admin_check_id_${k.id}` }, { text: "🔎 Check", callback_data: `admin_check_id_${k.id}` }]);
-        });
-
-        const finalMessage = "👥 **User List**\n\n" + message;
-        
-        bot.sendMessage(chatId, finalMessage.substring(0, 4000), { 
-             parse_mode: 'Markdown', 
-             reply_markup: { inline_keyboard: inlineKeyboard }
-        }).catch(e => {
-            console.error("Error sending user list with inline buttons:", e.message);
-            bot.sendMessage(chatId, "👥 **User List** (Formatting Error: Sending as plain text)");
-            bot.sendMessage(chatId, finalMessage, { reply_markup: { inline_keyboard: inlineKeyboard } });
-        });
-
-    } catch (e) {
-        bot.sendMessage(chatId, `❌ **API Error!**\n\n${e.message}`);
-    }
-}
-
-async function sendKeyDetails(chatId, keyId) {
-    try {
-        const [keysRes, metricsRes] = await Promise.all([client.get(`${OUTLINE_API_URL}/access-keys`), client.get(`${OUTLINE_API_URL}/metrics/transfer`)]);
-        const key = keysRes.data.accessKeys.find(k => String(k.id) === String(keyId));
-        if (!key) return bot.sendMessage(chatId, "❌ Key not found.");
-
-        const usage = metricsRes.data.bytesTransferredByUserId[key.id] || 0;
-        const limit = key.dataLimit ? key.dataLimit.bytes : 0;
-        const remaining = limit - usage;
-        
-        let cleanName = key.name; let expireDate = "Unknown";
-        if (key.name.includes('|')) { const parts = key.name.split('|'); cleanName = parts[0].trim(); expireDate = parts[1].trim(); }
-
-        const safeCleanName = sanitizeText(cleanName);
-
-        let status = "🟢 Active";
-        if (limit > 0 && remaining <= 0) status = "🔴 Data Depleted";
-        if (limit <= 5000) status = "🔴 Expired/Blocked";
-
-        const remainingDays = getDaysRemaining(expireDate);
-
-        const msg = `
-👮‍♂️ **User Management**
------------------------
-👤 **Name:** ${safeCleanName}
-📡 **Status:** ${status}
-⏳ **Remaining Day:** ${remainingDays}
-⬇️ **Used:** ${formatBytes(usage)}
-🎁 **Remaining Data:** ${formatBytes(remaining > 0 ? remaining : 0)}
-📅 **Expire:** ${expireDate}
-
-${getProgressBar(usage, limit)}
-`;
-        const sentMsg = await bot.sendMessage(chatId, msg, { parse_mode: 'Markdown', reply_markup: { inline_keyboard: [[{ text: "🗑️ DELETE", callback_data: `confirm_delete_${key.id}` }]] } });
-        adminMessageCache[key.id] = sentMsg.message_id; 
-    } catch (e) {
-        bot.sendMessage(chatId, `❌ **Error:** ${e.message}`);
-    }
-}
-
-async function runGuardian() {
-
-    try {
-        const [kRes, mRes] = await Promise.all([client.get(`${OUTLINE_API_URL}/access-keys`), client.get(`${OUTLINE_API_URL}/metrics/transfer`)]);
-        const keys = kRes.data.accessKeys;
-        const usage = mRes.data.bytesTransferredByUserId || {};
-        const today = getMyanmarDate(0); 
-        const now = Date.now();
-        for (const k of keys) {
-            const lim = k.dataLimit ? k.dataLimit.bytes : 0;
-            const isTestKey = k.name.startsWith("TEST_");
-            if (isTestKey) {
-                let testExpired = false;
-                if (k.name.includes('|')) { const d = k.name.split('|')[1].trim(); if (/^\d{4}-\d{2}-\d{2}$/.test(d) && d < today) testExpired = true; }
-                if (lim > 0 && (usage[k.id] || 0) >= lim) testExpired = true;
-                if (testExpired) { await client.delete(`${OUTLINE_API_URL}/access-keys/${k.id}`); continue; }
-            }
-            if (!isTestKey) {
-                if (lim > 0 && lim <= 5000) {
-                    if (!blockedKeys[k.id]) { blockedKeys[k.id] = now; } 
-                    else { if ((now - blockedKeys[k.id]) / (3600000) >= AUTO_DELETE_HOURS) { try { await client.delete(`${OUTLINE_API_URL}/access-keys/${k.id}`); delete blockedKeys[k.id]; bot.sendMessage(ADMIN_ID, `🗑️ **Auto-Deleted:** ${k.name}`); } catch (err) {} } }
-                    continue;
+            if (state.status === 'RESELLER_LOGIN_PASS') {
+                const username = userStates[chatId].username;
+                const password = text.trim();
+                const reseller = resellers.find(r => r.username === username && r.password === password);
+                if(reseller) {
+                    resellerSessions[chatId] = reseller.username;
+                    delete userStates[chatId];
+                    bot.sendMessage(chatId, `✅ **Login Success!**\n👤 Owner: ${reseller.username}\n💰 Balance: ${reseller.balance} Ks`, { parse_mode: 'Markdown', reply_markup: { keyboard: getResellerMenu(reseller.username, reseller.balance), resize_keyboard: true } });
+                } else {
+                    delete userStates[chatId];
+                    bot.sendMessage(chatId, "❌ **Login Failed!**", { reply_markup: { keyboard: getMainMenu(chatId), resize_keyboard: true } });
                 }
-                let block = false;
-                if (k.name.includes('|')) { const d = k.name.split('|')[1].trim(); if (/^\d{4}-\d{2}-\d{2}$/.test(d) && d < today) block = true; }
-                if (lim > 5000 && (usage[k.id] || 0) >= lim) block = true;
-                if (block) { await client.put(`${OUTLINE_API_URL}/access-keys/${k.id}/data-limit`, { limit: { bytes: 1 } }); blockedKeys[k.id] = now; bot.sendMessage(ADMIN_ID, `🚫 **Blocked:** ${k.name}\n⏳ Will delete in 24h.`); }
+                return;
             }
+            
+            if (state.status === 'RESELLER_ENTER_NAME') {
+                 const { plan, reseller: rUsername, serverIndex } = userStates[chatId];
+                 const customerName = text.trim().replace(/\|/g, '');
+                 
+                 bot.sendMessage(chatId, "⏳ Generating Key...");
+                 try {
+                    const rIndex = resellers.findIndex(r => r.username === rUsername);
+                    if(rIndex === -1 || resellers[rIndex].balance < plan.price) {
+                         bot.sendMessage(chatId, "❌ Insufficient Balance or Error.", { reply_markup: { keyboard: getResellerMenu(rUsername, resellers[rIndex] ? resellers[rIndex].balance : 0), resize_keyboard: true } });
+                    } else {
+                        resellers[rIndex].balance -= parseInt(plan.price);
+                        fs.writeFileSync(RESELLER_FILE, JSON.stringify(resellers, null, 4));
+                        const expireDate = getMyanmarDate(plan.days);
+                        const limitBytes = Math.floor(plan.gb * 1024 * 1024 * 1024);
+                        const finalName = `${customerName} (R-${rUsername}) | ${expireDate}`;
+                        const data = await createKeyOnServer(serverIndex, finalName, limitBytes);
+                        let finalUrl = formatAccessUrl(data.accessUrl, data._serverUrl); finalUrl += `#${encodeURIComponent(customerName)}`;
+                        bot.sendMessage(chatId, `✅ **Key Created!**\n\n👤 Customer: ${customerName}\n🖥️ Server: ${data._serverName}\n💰 Cost: ${plan.price} Ks\n💰 Remaining: ${resellers[rIndex].balance} Ks\n\n🔗 **Key:**\n<code>${finalUrl}</code>`, { 
+                            parse_mode: 'HTML',
+                            reply_markup: { keyboard: getResellerMenu(rUsername, resellers[rIndex].balance), resize_keyboard: true }
+                        });
+                    }
+                 } catch(e) { 
+                     bot.sendMessage(chatId, "❌ Error connecting to servers.", { reply_markup: { keyboard: getResellerMenu(rUsername, resellers.find(r=>r.username===rUsername).balance), resize_keyboard: true } }); 
+                 }
+                 delete userStates[chatId];
+                 return;
+            }
+
+            if (state.status === 'ADMIN_TOPUP_AMOUNT') {
+                if(!isAdmin(chatId)) return;
+                const amount = parseInt(text.trim());
+                if(isNaN(amount)) return bot.sendMessage(chatId, "❌ Invalid Amount. Enter number only.");
+                
+                const targetReseller = state.targetReseller;
+                const rIndex = resellers.findIndex(r => r.username === targetReseller);
+                
+                if(rIndex !== -1) {
+                    resellers[rIndex].balance = parseInt(resellers[rIndex].balance) + amount;
+                    fs.writeFileSync(RESELLER_FILE, JSON.stringify(resellers, null, 4));
+                    bot.sendMessage(chatId, `✅ **Topup Success!**\n👤 Reseller: ${targetReseller}\n💰 Added: ${amount} Ks\n💰 New Balance: ${resellers[rIndex].balance} Ks`, { 
+                        parse_mode: 'Markdown',
+                        reply_markup: { keyboard: getMainMenu(chatId), resize_keyboard: true }
+                    });
+                } else {
+                    bot.sendMessage(chatId, "❌ Reseller not found.", { reply_markup: { keyboard: getMainMenu(chatId), resize_keyboard: true } });
+                }
+                delete userStates[chatId];
+                return;
+            }
+            return; 
         }
-    } catch (e) { console.error("Guardian Error"); }
+
+        if (resellerSessions[chatId]) {
+            const rUser = resellerSessions[chatId];
+            const reseller = resellers.find(r => r.username === rUser);
+            
+            if (text === BTN.resell_logout) {
+                delete resellerSessions[chatId];
+                return bot.sendMessage(chatId, "👋 Logged out.", { reply_markup: { keyboard: getMainMenu(chatId), resize_keyboard: true } });
+            }
+            if (text.startsWith(BTN.resell_buy.split('(')[0].trim())) {
+                 return bot.sendMessage(chatId, `💰 **Your Balance:** ${reseller.balance} Ks\n\nTo topup, contact Admin.`, { parse_mode: 'Markdown' });
+            }
+            if (text === BTN.resell_create) {
+                const plansToUse = (config.reseller_plans && config.reseller_plans.length > 0) ? config.reseller_plans : config.plans;
+                if(!plansToUse || plansToUse.length === 0) return bot.sendMessage(chatId, "❌ No reseller plans available.");
+                const keyboard = plansToUse.map((p, i) => [{ text: `${p.days} Days - ${p.gb}GB - ${p.price}Ks`, callback_data: `resell_buy_${i}` }]); 
+                return bot.sendMessage(chatId, "📅 **Choose Reseller Plan:**", { parse_mode: 'Markdown', reply_markup: { inline_keyboard: keyboard } });
+            }
+            
+            if (text === BTN.resell_extend) {
+                bot.sendMessage(chatId, "🔎 Loading your users for extension...");
+                try {
+                    const myKeys = await getAllKeysFromAllServers(k => k.name.includes(`(R-${rUser})`));
+                    if(myKeys.length === 0) return bot.sendMessage(chatId, "❌ You have no users.");
+                    
+                    let allButtons = [];
+                    const servers = getServers();
+                    myKeys.forEach(k => {
+                        let cleanName = k.name.split('|')[0].replace(`(R-${rUser})`, '').trim();
+                        const srvIdx = servers.findIndex(s => s.url === k._serverUrl);
+                        if (srvIdx !== -1) {
+                            allButtons.push([{ text: `👤 ${cleanName} (${k._serverName || 'Srv'})`, callback_data: `rchk_${srvIdx}_${k.id}` }]);
+                        }
+                    });
+
+                    const chunkSize = 10; 
+                    for (let i = 0; i < allButtons.length; i += chunkSize) {
+                        const chunk = allButtons.slice(i, i + chunkSize);
+                        await bot.sendMessage(chatId, `⚙️ **Select User to Extend (Set ${Math.floor(i / chunkSize) + 1})**`, { 
+                            parse_mode: 'Markdown', 
+                            reply_markup: { inline_keyboard: chunk } 
+                        });
+                    }
+                } catch(e) { bot.sendMessage(chatId, "⚠️ Server Error"); }
+                return;
+            }
+
+            if (text === BTN.resell_users) {
+                bot.sendMessage(chatId, "🔎 Checking your users...");
+                try {
+                    const myKeys = await getAllKeysFromAllServers(k => k.name.includes(`(R-${rUser})`));
+                    if(myKeys.length === 0) return bot.sendMessage(chatId, "❌ You haven't created any keys yet.");
+                    
+                    const chunkSize = 10;
+                    for (let i = 0; i < myKeys.length; i += chunkSize) {
+                        const chunk = myKeys.slice(i, i + chunkSize);
+                        let txt = `👥 **User List (Part ${Math.floor(i / chunkSize) + 1})**\n\n`;
+                        chunk.forEach(k => {
+                            let cleanName = k.name.split('|')[0].replace(`(R-${rUser})`, '').trim();
+                            let expireDate = "Unknown";
+                            if(k.name.includes('|')) { expireDate = k.name.split('|').pop().trim(); }
+                            txt += `👤 ${cleanName} @ ${k._serverName || 'Server'}\n📅 Exp: ${expireDate}\n🔗 ${formatAccessUrl(k.accessUrl, k._serverUrl)}#${encodeURIComponent(cleanName)}\n\n`;
+                        });
+                        await bot.sendMessage(chatId, txt, { disable_web_page_preview: true });
+                    }
+                } catch(e) { bot.sendMessage(chatId, "⚠️ Error fetching users."); }
+                return;
+            }
+            return;
+        }
+
+        if (text === BTN.reseller) {
+            userStates[chatId] = { status: 'RESELLER_LOGIN_USER' };
+            return bot.sendMessage(chatId, "🔐 **Reseller Login**\n\nPlease enter your **Username**:", { parse_mode: 'Markdown', reply_markup: { remove_keyboard: true } });
+        }
+
+        if (text === BTN.trial) {
+            if (!TRIAL_ENABLED) return bot.sendMessage(chatId, "⚠️ Free Trial is currently disabled.");
+            if (claimedUsers.includes(chatId)) return bot.sendMessage(chatId, "⚠️ You have already claimed a trial key.");
+            bot.sendMessage(chatId, "🖥️ **Select Server for Trial:**", {
+                parse_mode: 'Markdown',
+                reply_markup: { inline_keyboard: getServerKeyboard('trial_srv') }
+            });
+            return;
+        }
+
+        if (text === BTN.buy) {
+            if(!config.plans || config.plans.length === 0) return bot.sendMessage(chatId, "❌ No plans available.");
+            const keyboard = config.plans.map((p, i) => [{ text: `${p.days} Days - ${p.gb}GB - ${p.price}Ks`, callback_data: `buy_${i}` }]); 
+            bot.sendMessage(chatId, "📅 **Choose Plan:**", { parse_mode: 'Markdown', reply_markup: { inline_keyboard: keyboard } });
+            return;
+        }
+
+        if (text === BTN.mykey) {
+            const userFullName = `${msg.from.first_name}`.trim(); 
+            bot.sendMessage(chatId, "🔎 Searching all servers..."); 
+            try { 
+                const result = await findKeyInAllServers(userFullName, true);
+                if (!result) return bot.sendMessage(chatId, "❌ **Key Not Found!**"); 
+                const { key, serverUrl, serverName } = result;
+                let cleanName = key.name.split('|')[0].trim();
+                let finalUrl = formatAccessUrl(key.accessUrl, serverUrl);
+                finalUrl += `#${encodeURIComponent(cleanName)}`;
+                bot.sendMessage(chatId, `🔑 <b>My Key (${serverName}):</b>\n<code>${finalUrl}</code>`, { parse_mode: 'HTML' }); 
+            } catch (e) { bot.sendMessage(chatId, "⚠️ Server Error"); }
+            return;
+        }
+
+        if (text === BTN.info) {
+            const userFullName = `${msg.from.first_name}`.trim(); 
+            bot.sendMessage(chatId, "🔎 Checking Status..."); 
+            try { 
+                const result = await findKeyInAllServers(userFullName, true);
+                if (!result) return bot.sendMessage(chatId, "❌ **Account Not Found**"); 
+                const { key, metrics, serverName } = result;
+                const used = metrics.bytesTransferredByUserId[key.id] || 0; 
+                const limit = key.dataLimit ? key.dataLimit.bytes : 0; 
+                const remaining = limit > 0 ? limit - used : 0; 
+                let cleanName = key.name; 
+                let expireDate = "Unknown"; 
+                if (key.name.includes('|')) { const parts = key.name.split('|'); cleanName = parts[0].trim(); expireDate = parts[parts.length-1].trim(); } 
+                
+                let statusIcon = "🟢"; let statusText = "Active"; 
+                if (limit === 0 || cleanName.startsWith("🔴")) { statusIcon = "🔴"; statusText = "Blocked/Switch OFF"; } 
+                else if (isExpired(expireDate)) { statusIcon = "🔴"; statusText = "Expired"; }
+                else if (limit > 0 && remaining <= 0) { statusIcon = "🔴"; statusText = "Data Depleted"; }
+                
+                let percent = limit > 0 ? Math.min((used / limit) * 100, 100) : 0; 
+                const barLength = 10; const fill = Math.round((percent / 100) * barLength); 
+                const bar = "█".repeat(fill) + "░".repeat(barLength - fill); 
+                const msgTxt = `👤 **Name:** ${sanitizeText(cleanName)}\n🖥️ **Server:** ${serverName}\n📡 **Status:** ${statusIcon} ${statusText}\n⏳ **Day:** ${getDaysRemaining(expireDate)}\n⬇️ **Used:** ${formatBytes(used)}\n🎁 **Free:** ${formatBytes(remaining > 0 ? remaining : 0)}\n📅 **Exp:** ${expireDate}\n\n[${bar}] ${percent.toFixed(1)}%`; 
+                bot.sendMessage(chatId, msgTxt, { parse_mode: 'Markdown' }); 
+            } catch (e) { bot.sendMessage(chatId, "⚠️ Server Error"); }
+            return;
+        }
+
+        if (text === BTN.support) {
+            const adminUsers = config.admin_username ? config.admin_username.split(',') : []; 
+            const keyboard = []; 
+            adminUsers.forEach(u => { let cleanUser = u.trim().replace('@', ''); if (cleanUser) keyboard.push([{ text: `💬 Chat with ${cleanUser}`, url: `https://t.me/${cleanUser}` }]); }); 
+            if (keyboard.length > 0) bot.sendMessage(chatId, "🆘 **Select an Admin:**", { parse_mode: 'Markdown', reply_markup: { inline_keyboard: keyboard } }); 
+            else bot.sendMessage(chatId, "⚠️ Contact not configured.");
+            return;
+        }
+
+        // --- ADMIN PANEL ---
+        if (text === "👮‍♂️ Admin Panel" && isAdmin(chatId)) {
+            const servers = getServers();
+            
+            let keyboard = [
+                [{ text: "📢 Broadcast Message", callback_data: "admin_broadcast" }], 
+                [{ text: "📊 DATABASE (Total Stats)", callback_data: "admin_db" }],
+                [{ text: "📂 ALL SERVERS (Show Keys)", callback_data: "admin_all" }],
+                [{ text: "👥 Reseller Users", callback_data: "admin_resellers" }],
+                [{ text: "💰 Reseller Topup", callback_data: "admin_topup" }]
+            ];
+            
+            servers.forEach((s, idx) => {
+                let sName = s.name || `Server ${idx + 1}`;
+                keyboard.push([{ text: `🖥️ ${sName}`, callback_data: `admin_srv_${idx}` }]);
+            });
+
+            bot.sendMessage(chatId, "🎛 **Admin Control Panel**\n\nSelect an option to manage:", { parse_mode: 'Markdown', reply_markup: { inline_keyboard: keyboard } });
+            return;
+        }
+    });
+
+    bot.on('callback_query', async (q) => { 
+        const chatId = q.message.chat.id; 
+        const data = q.data; 
+        const userFullName = `${q.from.first_name}`.trim();
+        const adminName = q.from.first_name; 
+
+        if (data.startsWith('trial_srv_')) {
+            if (!TRIAL_ENABLED) return bot.sendMessage(chatId, "Trial Disabled.");
+            if (claimedUsers.includes(chatId)) return bot.sendMessage(chatId, "Already claimed.");
+            
+            const serverIndex = parseInt(data.split('_')[2]);
+            bot.sendMessage(chatId, "⏳ Creating Test Key...");
+            try {
+                const expireDate = getMyanmarDate(TRIAL_DAYS);
+                const userFullName = `${q.from.first_name}`.trim(); 
+                const username = q.from.username ? `#${q.from.username}` : '';
+                const name = `TEST_${userFullName.replace(/\|/g, '').trim()} ${username} | ${expireDate}`; 
+                const limitBytes = Math.floor(TRIAL_GB * 1024 * 1024 * 1024);
+                
+                const data = await createKeyOnServer(serverIndex, name, limitBytes);
+                
+                claimedUsers.push(chatId); fs.writeFileSync(CLAIM_FILE, JSON.stringify(claimedUsers));
+                let finalUrl = formatAccessUrl(data.accessUrl, data._serverUrl); finalUrl += `#${encodeURIComponent(name.split('|')[0].trim())}`;
+                
+                bot.deleteMessage(chatId, q.message.message_id);
+                bot.sendMessage(chatId, `🎉 <b>Free Trial Created!</b>\n\n👤 Name: ${userFullName}\n🖥️ Server: ${data._serverName}\n📅 Duration: ${TRIAL_DAYS} Days\n📦 Data: ${TRIAL_GB} GB\n📅 Expire: ${expireDate}\n\n🔗 <b>Key:</b>\n<code>${finalUrl}</code>`, { parse_mode: 'HTML' }); 
+            } catch (e) { bot.sendMessage(chatId, "❌ Error creating test key."); }
+            return;
+        }
+
+        if (data.startsWith('resell_buy_')) {
+            const rUser = resellerSessions[chatId];
+            if (!rUser) return bot.answerCallbackQuery(q.id, { text: "Session Expired. Login again.", show_alert: true });
+            const planIdx = parseInt(data.split('_')[2]);
+            const plansToUse = (config.reseller_plans && config.reseller_plans.length > 0) ? config.reseller_plans : config.plans;
+            const p = plansToUse[planIdx];
+            const reseller = resellers.find(r => r.username === rUser);
+            if(parseInt(reseller.balance) < parseInt(p.price)) {
+                return bot.answerCallbackQuery(q.id, { text: `⚠️ Insufficient Balance!\nNeed: ${p.price} Ks`, show_alert: true });
+            }
+            userStates[chatId] = { status: 'RESELLER_SELECT_SERVER', plan: p, reseller: rUser };
+            bot.sendMessage(chatId, "🖥️ **Select Server:**", {
+                parse_mode: 'Markdown',
+                reply_markup: { inline_keyboard: getServerKeyboard('rsrv') }
+            });
+            return;
+        }
+
+        if (data.startsWith('rsrv_')) {
+            const rUser = resellerSessions[chatId];
+            if (!rUser) return bot.sendMessage(chatId, "❌ Session Expired.");
+            
+            const serverIndex = parseInt(data.split('_')[1]);
+            if (!userStates[chatId] || userStates[chatId].status !== 'RESELLER_SELECT_SERVER') {
+                 return bot.sendMessage(chatId, "❌ Flow Error. Please start over.");
+            }
+            userStates[chatId].serverIndex = serverIndex;
+            userStates[chatId].status = 'RESELLER_ENTER_NAME';
+            const p = userStates[chatId].plan;
+            
+            bot.deleteMessage(chatId, q.message.message_id);
+            bot.sendMessage(chatId, `👤 **Enter Customer Name:**\n(Plan: ${p.days} Days / ${p.gb} GB)\n(Server Selected)`, { parse_mode: 'Markdown', reply_markup: { force_reply: true } });
+            return;
+        }
+
+        if (data.startsWith('buy_') && !data.startsWith('buy_srv_')) { 
+            const planIdx = parseInt(data.split('_')[1]);
+            bot.sendMessage(chatId, "🖥️ **Select Server:**", {
+                parse_mode: 'Markdown',
+                reply_markup: { inline_keyboard: getServerKeyboard(`buy_srv_${planIdx}`) }
+            });
+            return;
+        } 
+
+        if (data.startsWith('buy_srv_')) {
+            const parts = data.split('_');
+            const planIdx = parseInt(parts[2]);
+            const serverIdx = parseInt(parts[3]);
+            const p = config.plans[planIdx];
+            const servers = getServers();
+            const sName = servers[serverIdx].name || "Server";
+
+            let payTxt = ""; 
+            if(config.payments) config.payments.forEach(pay => payTxt += `▪️ ${pay.name}: \`${pay.num}\` (${pay.owner})\n`); 
+            
+            userStates[chatId] = { 
+                status: 'WAITING_SLIP', 
+                plan: p, 
+                name: userFullName, 
+                type: 'NEW', 
+                username: q.from.username,
+                targetServerIndex: serverIdx,
+                targetServerName: sName
+            }; 
+            
+            bot.deleteMessage(chatId, q.message.message_id);
+            bot.sendMessage(chatId, `✅ **Plan:** ${p.days} Days (${p.gb}GB)\n🖥️ **Server:** ${sName}\n💰 **Price:** ${p.price} Ks\n\n💸 **Payments:**\n${payTxt}\n⚠️ ငွေလွှဲပြီးပါက ပြေစာ (Screenshot) ပို့ပေးပါ။`, {parse_mode: 'Markdown'}); 
+            return;
+        }
+
+        // --- ADMIN CALLBACKS ---
+        if (isAdmin(chatId)) {
+            if (data === 'admin_broadcast') {
+                userStates[chatId] = { status: 'ADMIN_BROADCAST_MSG' };
+                bot.sendMessage(chatId, `📢 **Broadcast Message**\n\nTotal Users: ${allUsers.length}\n\nPlease enter the message you want to send to ALL users:`, { parse_mode: 'Markdown', reply_markup: { force_reply: true } });
+                return;
+            }
+
+            if (data === 'admin_topup') {
+                 if (!resellers || resellers.length === 0) return bot.sendMessage(chatId, "❌ No resellers found.");
+                 let keyboard = [];
+                 resellers.forEach(r => {
+                    keyboard.push([{ text: `💰 ${r.username} (Bal: ${r.balance})`, callback_data: `rtop_${r.username}` }]);
+                 });
+                 bot.sendMessage(chatId, "💰 **Select Reseller to Topup:**", { parse_mode: 'Markdown', reply_markup: { inline_keyboard: keyboard } });
+                 return;
+            }
+
+            if (data.startsWith('rtop_')) {
+                const targetReseller = data.split('_')[1];
+                userStates[chatId] = { status: 'ADMIN_TOPUP_AMOUNT', targetReseller: targetReseller };
+                bot.sendMessage(chatId, `💰 **Enter Topup Amount for ${targetReseller}:**\n(Enter negative amount to deduct, e.g., -1000)`, { parse_mode: 'Markdown', reply_markup: { force_reply: true } });
+                return;
+            }
+
+            if (data === 'admin_resellers') {
+                if (!resellers || resellers.length === 0) return bot.sendMessage(chatId, "❌ No resellers registered.");
+                let keyboard = [];
+                resellers.forEach(r => {
+                    keyboard.push([{ text: `👤 ${r.username} (${r.balance} Ks)`, callback_data: `admin_rlist_${r.username}` }]);
+                });
+                bot.sendMessage(chatId, "👥 **Select a Reseller:**", { parse_mode: 'Markdown', reply_markup: { inline_keyboard: keyboard } });
+                return;
+            }
+
+            // --- ADMIN RESELLER LIST (PAGINATED 10/msg) ---
+            if (data.startsWith('admin_rlist_')) {
+                const targetReseller = data.split('_')[2];
+                bot.sendMessage(chatId, `🔎 Finding users for **${targetReseller}**...`, { parse_mode: 'Markdown' });
+                try {
+                    const keys = await getAllKeysFromAllServers(k => k.name.includes(`(R-${targetReseller})`));
+                    keys.sort((a,b) => parseInt(a.id) - parseInt(b.id)); 
+                    if (keys.length === 0) return bot.sendMessage(chatId, "❌ No users found for this reseller.");
+
+                    const chunkSize = 10;
+                    const servers = getServers();
+                    for (let i = 0; i < keys.length; i += chunkSize) {
+                        const chunk = keys.slice(i, i + chunkSize);
+                        let txt = `👤 **${targetReseller}'s Users (Part ${Math.floor(i / chunkSize) + 1})**\n\n`;
+                        let kb = [];
+                        chunk.forEach(k => {
+                            let name = k.name || "No Name";
+                            let sName = k._serverName || "Srv";
+                            txt += `🆔 ${k.id} (${sName}) : ${sanitizeText(name)}\n`;
+                            let btnName = `[${sName}] ${name}`;
+                            if(btnName.length > 25) btnName = btnName.substring(0,25)+"..";
+                            const srvIdx = servers.findIndex(s => s.url === k._serverUrl);
+                            if(srvIdx !== -1) { kb.push([{ text: btnName, callback_data: `chk_${srvIdx}_${k.id}` }]); }
+                        });
+                        await bot.sendMessage(chatId, txt, { parse_mode: 'Markdown', reply_markup: { inline_keyboard: kb } });
+                    }
+                } catch(e) { bot.sendMessage(chatId, "Error fetching reseller keys."); }
+                return;
+            }
+
+            if (data === 'admin_db') {
+                bot.answerCallbackQuery(q.id, { text: "Calculating Stats..." });
+                const servers = getServers();
+                let totalKeys = 0;
+                let totalBytes = 0;
+                try {
+                    const promises = servers.map(async (srv) => {
+                        try {
+                            const [kRes, mRes] = await Promise.all([
+                                axiosClient.get(`${srv.url}/access-keys`),
+                                axiosClient.get(`${srv.url}/metrics/transfer`)
+                            ]);
+                            return { keys: kRes.data.accessKeys.length, metrics: mRes.data.bytesTransferredByUserId };
+                        } catch(e) { return { keys: 0, metrics: {} }; }
+                    });
+                    const results = await Promise.all(promises);
+                    results.forEach(res => {
+                        totalKeys += res.keys;
+                        Object.values(res.metrics).forEach(bytes => totalBytes += bytes);
+                    });
+                    bot.sendMessage(chatId, `📊 **DATABASE STATISTICS**\n\n💾 **Total Servers:** ${servers.length}\n🔑 **Total Keys:** ${totalKeys}\n📡 **Total Traffic:** ${formatBytes(totalBytes)}\n👥 **Total Bot Users:** ${allUsers.length}`, { parse_mode: 'Markdown' });
+                } catch(e) { bot.sendMessage(chatId, "❌ Error fetching stats."); }
+                return;
+            }
+
+            // --- ADMIN ALL SERVERS (PAGINATED 10/msg) ---
+            if (data === 'admin_all') {
+                bot.sendMessage(chatId, "⌛ Loading ALL Users..."); 
+                try { 
+                    const keys = await getAllKeysFromAllServers();
+                    keys.sort((a,b) => parseInt(a.id) - parseInt(b.id)); 
+                    const chunkSize = 10;
+                    const servers = getServers();
+                    for (let i = 0; i < keys.length; i += chunkSize) {
+                        const chunk = keys.slice(i, i + chunkSize);
+                        let txt = `👥 **ALL USERS (Part ${Math.floor(i / chunkSize) + 1})**\n\n`; 
+                        let kb = []; 
+                        chunk.forEach(k => { 
+                            let name = k.name || "No Name"; 
+                            txt += `🆔 ${k.id} : ${sanitizeText(name)}\n`; 
+                            let btnName = `[${k._serverName}] ${name}`; 
+                            if(btnName.length > 25) btnName = btnName.substring(0,25)+".."; 
+                            const srvIdx = servers.findIndex(s => s.url === k._serverUrl);
+                            if(srvIdx !== -1) { kb.push([{ text: btnName, callback_data: `chk_${srvIdx}_${k.id}` }]); }
+                        }); 
+                        await bot.sendMessage(chatId, txt, { parse_mode: 'Markdown', reply_markup: { inline_keyboard: kb } }); 
+                    }
+                } catch(e) { bot.sendMessage(chatId, "Error fetching list"); }
+                return;
+            }
+
+            // --- ADMIN SPECIFIC SERVER (PAGINATED 10/msg) ---
+            if (data.startsWith('admin_srv_')) {
+                const srvIdx = parseInt(data.split('_')[2]);
+                const servers = getServers();
+                const targetSrv = servers[srvIdx];
+                if (!targetSrv) return bot.sendMessage(chatId, "Server not found.");
+                bot.sendMessage(chatId, `⌛ Loading users from **${targetSrv.name || 'Server'}**...`, { parse_mode: 'Markdown' });
+                try {
+                    const keys = await getKeysFromSpecificServer(srvIdx);
+                    keys.sort((a,b) => parseInt(a.id) - parseInt(b.id));
+                    const chunkSize = 10;
+                    for (let i = 0; i < keys.length; i += chunkSize) {
+                        const chunk = keys.slice(i, i + chunkSize);
+                        let txt = `🖥️ **${targetSrv.name} (Part ${Math.floor(i / chunkSize) + 1})**\n\n`;
+                        let kb = [];
+                        chunk.forEach(k => {
+                            let name = k.name || "No Name"; 
+                            txt += `🆔 ${k.id} : ${sanitizeText(name)}\n`; 
+                            let btnName = `[${k.id}] ${name}`; 
+                            if(btnName.length > 20) btnName = btnName.substring(0,20)+".."; 
+                            kb.push([{ text: btnName, callback_data: `chk_${srvIdx}_${k.id}` }]); 
+                        }); 
+                        await bot.sendMessage(chatId, txt, { parse_mode: 'Markdown', reply_markup: { inline_keyboard: kb } });
+                    }
+                } catch(e) { bot.sendMessage(chatId, "Error fetching keys from server."); }
+                return;
+            }
+
+             if (data.startsWith('chk_')) { 
+                const parts = data.split('_');
+                let serverIndex = -1;
+                let kid = parts[1];
+
+                if (parts.length === 3) {
+                    serverIndex = parseInt(parts[1]);
+                    kid = parts[2];
+                }
+
+                try { 
+                    let result = null;
+                    if (serverIndex !== -1) {
+                        const servers = getServers();
+                        if (servers[serverIndex]) {
+                            const srv = servers[serverIndex];
+                            try {
+                                const [kRes, mRes] = await Promise.all([
+                                    axiosClient.get(`${srv.url}/access-keys`),
+                                    axiosClient.get(`${srv.url}/metrics/transfer`)
+                                ]);
+                                const key = kRes.data.accessKeys.find(k => String(k.id) === String(kid));
+                                if (key) {
+                                    result = { key, metrics: mRes.data, serverUrl: srv.url, serverName: srv.name };
+                                }
+                            } catch (e) { console.log("Specific server fetch error"); }
+                        }
+                    } else {
+                         result = await findKeyInAllServers(kid);
+                    }
+
+                    if(!result) return bot.sendMessage(chatId, "Key not found or Server Error"); 
+                    
+                    const { key, metrics, serverName } = result;
+                    const usage = metrics.bytesTransferredByUserId[key.id] || 0; 
+                    const limit = key.dataLimit ? key.dataLimit.bytes : 0; const remaining = limit > 0 ? limit - usage : 0; 
+                    let cleanName = key.name; let expireDate = "N/A"; 
+                    if (key.name.includes('|')) { const parts = key.name.split('|'); cleanName = parts[0].trim(); expireDate = parts[parts.length-1].trim(); } 
+                    
+                    let statusIcon = "🟢"; let statusText = "Active"; 
+                    if (limit === 0 || cleanName.startsWith("🔴")) { 
+                        statusIcon = "🔴"; statusText = "Blocked/OFF"; 
+                    } 
+                    else if (isExpired(expireDate)) { statusIcon = "🔴"; statusText = "Expired"; } 
+                    
+                    let percent = limit > 0 ? Math.min((usage / limit) * 100, 100) : 0; const barLength = 10; const fill = Math.round((percent / 100) * barLength); const bar = "░".repeat(barLength).split('').map((c, i) => i < fill ? "█" : c).join(''); 
+                    const msg = `👮 User Management\n---------------------\n👤 Name: ${cleanName}\n🖥️ Server: ${serverName}\n📡 Status: ${statusIcon} ${statusText}\n⏳ Remaining: ${getDaysRemaining(expireDate)}\n⬇️ Used: ${formatBytes(usage)}\n🎁 Free: ${limit ? formatBytes(remaining) : 'Unl'}\n📅 Expire: ${expireDate}\n\n${bar} ${percent.toFixed(1)}%`; 
+                    bot.sendMessage(chatId, msg, { reply_markup: { inline_keyboard: [[{ text: "⏳ RENEW / EXTEND", callback_data: `adm_ext_${key.id}` }], [{ text: "🗑️ DELETE", callback_data: `del_${key.id}` }]] } }); 
+                } catch(e) {} 
+            } 
+
+            if (data.startsWith('adm_ext_')) {
+                const kid = data.split('_')[2];
+                if (!config.plans || config.plans.length === 0) return bot.sendMessage(chatId, "❌ No public plans configured.");
+                const keyboard = config.plans.map((p, i) => [{ text: `+${p.days} Days (${p.gb}GB)`, callback_data: `adm_renew_${kid}_${i}` }]);
+                bot.sendMessage(chatId, "👮‍♂️ **Admin Renew: Select Plan**", { parse_mode: 'Markdown', reply_markup: { inline_keyboard: keyboard } });
+            }
+            if (data.startsWith('adm_renew_')) {
+                const parts = data.split('_'); const keyId = parts[2]; const planIdx = parseInt(parts[3]); const p = config.plans[planIdx];
+                try {
+                    const result = await findKeyInAllServers(keyId);
+                    if(!result) return bot.sendMessage(chatId, "Key not found");
+                    const { key, serverUrl } = result;
+                    let oldDateStr = key.name.split('|').pop().trim();
+                    let newDate = isExpired(oldDateStr) ? getMyanmarDate(p.days) : moment(oldDateStr, "YYYY-MM-DD").add(p.days, 'days').format('YYYY-MM-DD');
+                    const limitBytes = Math.floor(p.gb * 1024 * 1024 * 1024);
+                    let cleanName = key.name.split('|')[0].trim();
+                    cleanName = cleanName.replace(/^🔴\s*\[BLOCKED\]\s*/, '').replace(/^🔴\s*/, '');
+                    await axiosClient.put(`${serverUrl}/access-keys/${keyId}/name`, { name: `${cleanName} | ${newDate}` });
+                    await axiosClient.put(`${serverUrl}/access-keys/${keyId}/data-limit`, { limit: { bytes: limitBytes } });
+                    bot.deleteMessage(chatId, q.message.message_id);
+                    bot.sendMessage(chatId, `✅ **Admin Renew Success!**\n\n👤 User: ${cleanName}\n📅 New Expire: ${newDate}\n📦 Data: ${p.gb} GB`, { parse_mode: 'Markdown' });
+                } catch(e) { bot.sendMessage(chatId, "❌ Error extending key."); }
+            }
+            if (data.startsWith('del_')) { 
+                try {
+                    const result = await findKeyInAllServers(data.split('_')[1]);
+                    if(result) {
+                        await axiosClient.delete(`${result.serverUrl}/access-keys/${result.key.id}`); 
+                        bot.sendMessage(chatId, "✅ User Deleted."); 
+                        bot.deleteMessage(chatId, q.message.message_id); 
+                    } else { bot.sendMessage(chatId, "Key not found"); }
+                } catch(e){}
+            } 
+            if (data.startsWith('approve_')) { 
+                const buyerId = data.split('_')[1]; 
+                if (!userStates[buyerId]) return bot.answerCallbackQuery(q.id, { text: "⚠️ Processed!", show_alert: true });
+                const { plan, name, username, targetServerIndex } = userStates[buyerId]; 
+                bot.editMessageCaption(`✅ Approved by ${adminName}`, { chat_id: chatId, message_id: q.message.message_id }); 
+                ADMIN_IDS.forEach(aid => { if (String(aid) !== String(chatId)) bot.sendMessage(aid, `🔔 **ORDER APPROVED**\n\n👤 Customer: ${name}\n📦 Plan: ${plan.days}D / ${plan.gb}GB\n👮‍♂️ Action: **${adminName}**`, { parse_mode: 'Markdown' }); });
+                try { 
+                    const expireDate = getMyanmarDate(plan.days); 
+                    const limit = plan.gb * 1024 * 1024 * 1024; 
+                    let finalName = `${name.replace(/\|/g,'').trim()} #${username || ''} | ${expireDate}`; 
+                    
+                    const data = await createKeyOnServer(targetServerIndex, finalName, limit);
+                    
+                    let finalUrl = formatAccessUrl(data.accessUrl, data._serverUrl); finalUrl += `#${encodeURIComponent(finalName.split('|')[0].trim())}`;
+                    bot.sendMessage(buyerId, `🎉 <b>Purchase Success!</b>\n\n👤 Name: ${name}\n🖥️ Server: ${data._serverName}\n📅 Expire: ${expireDate}\n\n🔗 <b>Key:</b>\n<code>${finalUrl}</code>`, { parse_mode: 'HTML' }); 
+                    delete userStates[buyerId]; 
+                } catch(e) { bot.sendMessage(ADMIN_IDS[0], "❌ Error creating key on selected server."); } 
+            } 
+            if (data.startsWith('reject_')) { 
+                const buyerId = data.split('_')[1]; 
+                if (!userStates[buyerId]) return bot.answerCallbackQuery(q.id, { text: "⚠️ Processed!", show_alert: true });
+                const { name, plan } = userStates[buyerId];
+                bot.sendMessage(buyerId, "❌ Your order was rejected."); 
+                bot.editMessageCaption(`❌ Rejected by ${adminName}`, { chat_id: chatId, message_id: q.message.message_id }); 
+                ADMIN_IDS.forEach(aid => { if (String(aid) !== String(chatId)) bot.sendMessage(aid, `🚫 **ORDER REJECTED**\n\n👤 Customer: ${name}\n📦 Plan: ${plan.days} Days\n👮‍♂️ Action: **${adminName}**`, { parse_mode: 'Markdown' }); });
+                delete userStates[buyerId];
+            } 
+        } 
+
+        // --- RESELLER ACTIONS ---
+        if (data.startsWith('rchk_')) {
+            const rUser = resellerSessions[chatId];
+            if (!rUser) return bot.answerCallbackQuery(q.id, { text: "Session Expired.", show_alert: true });
+            const parts = data.split('_');
+            const srvIdx = parseInt(parts[1]);
+            const keyId = parts[2];
+            const servers = getServers();
+            const targetServer = servers[srvIdx];
+            if (!targetServer) return bot.sendMessage(chatId, "⚠️ Server Error.");
+            try { 
+                const [kRes, mRes] = await Promise.all([
+                    axiosClient.get(`${targetServer.url}/access-keys`),
+                    axiosClient.get(`${targetServer.url}/metrics/transfer`)
+                ]);
+                const key = kRes.data.accessKeys.find(k => String(k.id) === String(keyId));
+                if(!key) return bot.sendMessage(chatId, "⚠️ Key not found.");
+                if(!key.name.includes(`(R-${rUser})`)) return bot.sendMessage(chatId, "⚠️ Access Denied. Not your user.");
+                const usage = mRes.data.bytesTransferredByUserId[key.id] || 0; 
+                const limit = key.dataLimit ? key.dataLimit.bytes : 0; 
+                let cleanName = key.name; let expireDate = "N/A"; 
+                if (key.name.includes('|')) { 
+                    const nParts = key.name.split('|'); 
+                    cleanName = nParts[0].replace(`(R-${rUser})`,'').trim(); 
+                    expireDate = nParts[nParts.length-1].trim(); 
+                } 
+                let statusIcon = "🟢"; let statusText = "Active"; 
+                if (limit === 0 || cleanName.startsWith("🔴")) { statusIcon = "🔴"; statusText = "Blocked/OFF"; } 
+                else if (isExpired(expireDate)) { statusIcon = "🔴"; statusText = "Expired"; } 
+                let percent = limit > 0 ? Math.min((usage / limit) * 100, 100) : 0; 
+                const barLength = 10; const fill = Math.round((percent / 100) * barLength); 
+                const bar = "█".repeat(fill) + "░".repeat(barLength - fill); 
+                const msg = `⚙️ **User Management System**\n--------------------------------\n👤 **Name:** ${cleanName}\n🖥️ **Server:** ${targetServer.name}\n📡 **Status:** ${statusIcon} ${statusText}\n⏳ **Remaining:** ${getDaysRemaining(expireDate)}\n⬇️ **Used:** ${formatBytes(usage)}\n🎁 **Limit:** ${limit ? formatBytes(limit) : 'Unlimited'}\n📅 **Expire:** ${expireDate}\n\n[${bar}] ${percent.toFixed(1)}%`;
+                bot.sendMessage(chatId, msg, { parse_mode: 'Markdown', reply_markup: { inline_keyboard: [
+                    [{ text: "⏳ Extend / Renew", callback_data: `rext_${srvIdx}_${key.id}` }], 
+                    [{ text: "🗑️ Delete User", callback_data: `rdel_${srvIdx}_${key.id}` }]
+                ] } }); 
+            } catch(e) { bot.sendMessage(chatId, "Error fetching details"); }
+        }
+
+        if (data.startsWith('rdel_')) {
+            const rUser = resellerSessions[chatId];
+            if (!rUser) return bot.answerCallbackQuery(q.id, { text: "Session Expired.", show_alert: true });
+            const parts = data.split('_');
+            const srvIdx = parseInt(parts[1]);
+            const keyId = parts[2];
+            const servers = getServers();
+            const targetServer = servers[srvIdx];
+            try {
+                const kRes = await axiosClient.get(`${targetServer.url}/access-keys`);
+                const key = kRes.data.accessKeys.find(k => String(k.id) === String(keyId));
+                if (key && key.name.includes(`(R-${rUser})`)) {
+                     await axiosClient.delete(`${targetServer.url}/access-keys/${keyId}`); 
+                     bot.deleteMessage(chatId, q.message.message_id); 
+                     bot.sendMessage(chatId, "✅ User Deleted."); 
+                } else {
+                     bot.sendMessage(chatId, "❌ Delete Failed: Key not found or Access Denied.");
+                }
+            } catch(e) { bot.sendMessage(chatId, "Delete Failed."); }
+        }
+
+        if (data.startsWith('rext_')) {
+            const rUser = resellerSessions[chatId];
+            if (!rUser) return bot.answerCallbackQuery(q.id, { text: "Session Expired.", show_alert: true });
+            const parts = data.split('_');
+            const srvIdx = parts[1]; 
+            const keyId = parts[2];
+            const plansToUse = (config.reseller_plans && config.reseller_plans.length > 0) ? config.reseller_plans : config.plans;
+            const keyboard = plansToUse.map((p, i) => [{ text: `+${p.days} Days (${p.gb}GB) - ${p.price}Ks`, callback_data: `rxp_${srvIdx}_${keyId}_${i}` }]);
+            bot.sendMessage(chatId, "📅 **Choose Extension Plan:**", { parse_mode: 'Markdown', reply_markup: { inline_keyboard: keyboard } });
+        }
+
+        if (data.startsWith('rxp_')) {
+            const rUser = resellerSessions[chatId];
+            if (!rUser) return bot.answerCallbackQuery(q.id, { text: "Session Expired.", show_alert: true });
+            const parts = data.split('_'); 
+            const srvIdx = parseInt(parts[1]);
+            const keyId = parts[2]; 
+            const planIdx = parseInt(parts[3]);
+            const servers = getServers();
+            const targetServer = servers[srvIdx];
+            const plansToUse = (config.reseller_plans && config.reseller_plans.length > 0) ? config.reseller_plans : config.plans;
+            const p = plansToUse[planIdx];
+            const resellerIdx = resellers.findIndex(r => r.username === rUser);
+            if(resellers[resellerIdx].balance < parseInt(p.price)) return bot.answerCallbackQuery(q.id, { text: "⚠️ Insufficient Balance!", show_alert: true });
+            try {
+                const kRes = await axiosClient.get(`${targetServer.url}/access-keys`);
+                const key = kRes.data.accessKeys.find(k => String(k.id) === String(keyId));
+                if(!key) return bot.sendMessage(chatId, "Key not found");
+                let oldDateStr = key.name.split('|').pop().trim();
+                let newDate = isExpired(oldDateStr) ? getMyanmarDate(p.days) : moment(oldDateStr, "YYYY-MM-DD").add(p.days, 'days').format('YYYY-MM-DD');
+                resellers[resellerIdx].balance -= parseInt(p.price);
+                fs.writeFileSync(RESELLER_FILE, JSON.stringify(resellers, null, 4));
+                const limitBytes = Math.floor(p.gb * 1024 * 1024 * 1024);
+                let cleanName = key.name.split('|')[0].trim();
+                cleanName = cleanName.replace(/^🔴\s*\[BLOCKED\]\s*/, '').replace(/^🔴\s*/, '');
+                await axiosClient.put(`${targetServer.url}/access-keys/${keyId}/name`, { name: `${cleanName} | ${newDate}` });
+                await axiosClient.put(`${targetServer.url}/access-keys/${keyId}/data-limit`, { limit: { bytes: limitBytes } });
+                bot.deleteMessage(chatId, q.message.message_id);
+                bot.sendMessage(chatId, `✅ **Extension Successful!**\n\n👤 User: ${cleanName}\n📅 New Expire: ${newDate}\n📦 Data: ${p.gb} GB`, { parse_mode: 'Markdown' });
+            } catch(e) { bot.sendMessage(chatId, "❌ Error extending key."); }
+        }
+    });
+
+    bot.on('photo', (msg) => { 
+        const chatId = msg.chat.id; 
+        if (userStates[chatId] && userStates[chatId].status === 'WAITING_SLIP') { 
+            const { plan, name, type, targetServerName } = userStates[chatId]; 
+            bot.sendMessage(chatId, "📩 Slip Received. Please wait."); 
+            ADMIN_IDS.forEach(adminId => { 
+                bot.sendPhoto(adminId, msg.photo[msg.photo.length - 1].file_id, { 
+                    caption: `💰 Order: ${name}\n📦 ${plan.days}D / ${plan.gb}GB\n🖥️ Server: ${targetServerName}\nType: ${type}`, 
+                    reply_markup: { inline_keyboard: [[{ text: "✅ Approve", callback_data: `approve_${chatId}` }, { text: "❌ Reject", callback_data: `reject_${chatId}` }]] } 
+                }).catch(e => {}); 
+            }); 
+        } 
+    });
+
+    async function runGuardian() { 
+        if (isGuardianRunning) return;
+        isGuardianRunning = true;
+
+        try { 
+            const keys = await getAllKeysFromAllServers();
+            const now = Date.now(); 
+            const today = moment().tz("Asia/Yangon").startOf('day');
+
+            for (const key of keys) { 
+                try {
+                    const serverUrl = key._serverUrl; 
+                    let mRes;
+                    try { mRes = await axiosClient.get(`${serverUrl}/metrics/transfer`); } 
+                    catch(err) { continue; }
+                    const usage = mRes.data.bytesTransferredByUserId[key.id] || 0; 
+                    const limit = key.dataLimit ? key.dataLimit.bytes : 0; 
+                    let expireDateStr = null; 
+                    if (key.name.includes('|')) expireDateStr = key.name.split('|').pop().trim(); 
+                    const isTrial = key.name.startsWith("TEST_"); 
+                    const expiredStatus = isExpired(expireDateStr); 
+                    
+                    if (key.name.startsWith("🔴")) {
+                        if (limit !== 0) { await axiosClient.put(`${serverUrl}/access-keys/${key.id}/data-limit`, { limit: { bytes: 0 } }); }
+                        continue; 
+                    }
+
+                    if (isTrial && (expiredStatus || (limit > 0 && usage >= limit))) { 
+                        await axiosClient.delete(`${serverUrl}/access-keys/${key.id}`); 
+                        const reason = expiredStatus ? "Trial Expired" : "Trial Data Limit"; 
+                        ADMIN_IDS.forEach(aid => bot.sendMessage(aid, `🗑️ **TRIAL DELETED**\n\n👤 Name: ${sanitizeText(key.name)}\n⚠️ Reason: ${reason}`, {parse_mode: 'Markdown'})); 
+                        continue; 
+                    } 
+
+                    if (!isTrial) {
+                        if (expiredStatus) {
+                            const expireMoment = moment.tz(expireDateStr, "YYYY-MM-DD", "Asia/Yangon").startOf('day');
+                            const daysPast = today.diff(expireMoment, 'days');
+                            if (daysPast >= 20) {
+                                await axiosClient.delete(`${serverUrl}/access-keys/${key.id}`);
+                                ADMIN_IDS.forEach(aid => bot.sendMessage(aid, `🗑️ **AUTO DELETED (>20 Days)**\n\n👤 Name: ${sanitizeText(key.name)}\n📅 Expired: ${expireDateStr}`, {parse_mode: 'Markdown'}));
+                                continue;
+                            } 
+                            const newName = `🔴 [BLOCKED] ${key.name}`;
+                            await axiosClient.put(`${serverUrl}/access-keys/${key.id}/name`, { name: newName });
+                            await axiosClient.put(`${serverUrl}/access-keys/${key.id}/data-limit`, { limit: { bytes: 0 } });
+                            ADMIN_IDS.forEach(aid => bot.sendMessage(aid, `🚫 **AUTO BLOCKED (Expired)**\n\n👤 Name: ${sanitizeText(key.name)}\n📉 Limit: 0 Bytes`, {parse_mode: 'Markdown'}));
+                            continue;
+                        }
+                        if (limit > 5000 && usage >= limit) { 
+                            const newName = `🔴 [BLOCKED] ${key.name}`;
+                            await axiosClient.put(`${serverUrl}/access-keys/${key.id}/name`, { name: newName });
+                            await axiosClient.put(`${serverUrl}/access-keys/${key.id}/data-limit`, { limit: { bytes: 0 } });
+                            if (!blockedRegistry[key.id]) { 
+                                blockedRegistry[key.id] = now; 
+                                fs.writeFileSync(BLOCKED_FILE, JSON.stringify(blockedRegistry)); 
+                                const msg = `🚫 **AUTO BLOCKED (Data Full)**\n\n👤 Name: ${sanitizeText(key.name)}\n⬇️ Used: ${formatBytes(usage)}`; 
+                                ADMIN_IDS.forEach(aid => bot.sendMessage(aid, msg, {parse_mode: 'Markdown'})); 
+                            } 
+                        } 
+                    }
+                } catch (innerError) { continue; }
+            } 
+        } catch (e) { console.log("Guardian Error", e.message); } 
+        finally { isGuardianRunning = false; }
+    }
+    // Set Interval to 20 Seconds
+    setInterval(runGuardian, 20000); 
 }
+EOF
 
-runGuardian();
-setInterval(runGuardian, CHECK_INTERVAL);
+# 7. Install Node Modules
+echo -e "${YELLOW}Installing Node Modules...${NC}"
+cd /root/vpn-shop
+cat << 'PKG' > package.json
+{
+  "name": "vpn-shop",
+  "version": "1.0.0",
+  "description": "Outline Telegram Bot & Panel",
+  "main": "bot.js",
+  "scripts": {
+    "start": "node bot.js"
+  },
+  "dependencies": {
+    "axios": "^1.6.0",
+    "body-parser": "^1.20.2",
+    "cors": "^2.8.5",
+    "express": "^4.18.2",
+    "moment-timezone": "^0.5.43",
+    "node-telegram-bot-api": "^0.63.0"
+  }
+}
+PKG
+npm install
 
-console.log("🚀 Bot Started with Updated Label!");
+# 8. Setup Nginx
+echo -e "${YELLOW}Configuring Nginx...${NC}"
+cat << 'NGINX' > /etc/nginx/sites-available/default
+server {
+    listen 80;
+    server_name _;
+    root /var/www/html;
+    index index.html;
 
-END_OF_FILE
+    location / {
+        try_files $uri $uri/ =404;
+    }
+}
+NGINX
+systemctl reload nginx
 
-# ---------------------------------------------------------
-# APPLY CONFIGURATION
-# ---------------------------------------------------------
-echo -e "${YELLOW}⚙️ Applying Configurations...${NC}"
+# 9. Setup Firewall (UFW)
+if ufw status | grep -q "Status: active"; then
+    echo -e "${YELLOW}Configuring Firewall...${NC}"
+    ufw allow 80/tcp
+    ufw allow 3000/tcp
+fi
 
-# Replace Server Config
-sed -i "s|REPLACE_API_URL|$API_URL|g" bot.js
-sed -i "s|REPLACE_BOT_TOKEN|$BOT_TOKEN|g" bot.js
-sed -i "s|REPLACE_ADMIN_ID|$ADMIN_ID|g" bot.js
-
-# Fix Admin Username (Remove @ if exists)
-CLEAN_USERNAME=${ADMIN_USERNAME//@/}
-sed -i "s|REPLACE_ADMIN_USER|$CLEAN_USERNAME|g" bot.js
-
-# Replace Payment Config
-sed -i "s|REPLACE_KPAY_INFO_TEXT|$KPAY_INFO_TEXT|g" bot.js
-sed -i "s|REPLACE_WAVE_INFO_TEXT|$WAVE_INFO_TEXT|g" bot.js
-sed -i "s|REPLACE_KPAY_NUM_FOR_COPY|$KPAY_COPY_DATA|g" bot.js
-sed -i "s|REPLACE_WAVE_NUM_FOR_COPY|$WAVE_COPY_DATA|g" bot.js
-
-# Replace Plan Configs
-sed -i "s|REPLACE_P1_GB|$P1_GB|g" bot.js; sed -i "s|REPLACE_P1_DAYS|$P1_DAYS|g" bot.js; sed -i "s|REPLACE_P1_PRICE|$P1_PRICE|g" bot.js
-sed -i "s|REPLACE_P2_GB|$P2_GB|g" bot.js; sed -i "s|REPLACE_P2_DAYS|$P2_DAYS|g" bot.js; sed -i "s|REPLACE_P2_PRICE|$P2_PRICE|g" bot.js
-sed -i "s|REPLACE_P3_GB|$P3_GB|g" bot.js; sed -i "s|REPLACE_P3_DAYS|$P3_DAYS|g" bot.js; sed -i "s|REPLACE_P3_PRICE|$P3_PRICE|g" bot.js
-
-# ---------------------------------------------------------
-# START BOT
-# ---------------------------------------------------------
-echo -e "${GREEN}🚀 Stopping old process...${NC}"
-pm2 delete vpn-shop > /dev/null 2>&1
-
-echo -e "${GREEN}🚀 Starting Bot...${NC}"
+# 10. Start Bot with PM2
+echo -e "${YELLOW}Starting Bot Process...${NC}"
+npm install -g pm2
 pm2 start bot.js --name "vpn-shop"
-pm2 save
 pm2 startup
+pm2 save
 
-echo -e "\n${GREEN}✅ INSTALLATION SUCCESSFUL!${NC}"
-echo -e "${YELLOW}Your VPN Shop Bot is running with Myanmar Time!${NC}"
-echo -e "${CYAN}------------------------------------------------${NC}"
-echo -e "Menu ပြောင်းလဲမှုများ:"
-echo -e "1. ${YELLOW}🔑 VPN KEY ပြရန်${NC} (Key URL သီးသန့်ပြမည်)"
-echo -e "2. ${YELLOW}👤 Package စစ်ရန်${NC} (Usage Status, Expire Date ပြမည်)"
-echo -e "3. Key Name တွင် Full Name နှင့် ${YELLOW}#TelegramUsername${NC} ပါဝင်ပါမည်။"
-echo -e "${CYAN}------------------------------------------------${NC}"
+echo -e "${GREEN}==========================================${NC}"
+echo -e "${GREEN} INSTALLATION COMPLETE! ${NC}"
+echo -e "${GREEN}==========================================${NC}"
+echo -e "Backend Port: ${YELLOW}3000${NC}"
+echo -e "Service Name: ${YELLOW}vpn-shop${NC}"
+echo -e "\nPlease visit your Panel URL and configure your Bot Token/Admin ID."
