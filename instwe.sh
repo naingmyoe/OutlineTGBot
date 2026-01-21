@@ -5,7 +5,7 @@ GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 NC='\033[0m'
 
-echo -e "${GREEN}=== VPN Shop Frontend Installer (Full UI + VPS Sync Logic) ===${NC}"
+echo -e "${GREEN}=== VPN Shop Frontend Update (Full UI + VPS Sync) ===${NC}"
 
 # 1. Check Root
 if [ "$EUID" -ne 0 ]; then
@@ -13,19 +13,10 @@ if [ "$EUID" -ne 0 ]; then
   exit
 fi
 
-# 2. Install Nginx if not exists
-echo -e "${YELLOW}Checking Nginx...${NC}"
-if ! command -v nginx &> /dev/null; then
-    echo "Installing Nginx..."
-    apt update && apt install -y nginx
-fi
+# 2. Update Frontend Files Only
+echo -e "${YELLOW}Updating index.html...${NC}"
+rm -rf /var/www/html/index.html
 
-# 3. Clear old files
-echo -e "${YELLOW}Clearing old frontend files...${NC}"
-rm -rf /var/www/html/*
-
-# 4. Create index.html with FULL UI & SYNC LOGIC
-echo -e "${YELLOW}Creating index.html with Full Features & Sync Logic...${NC}"
 cat << 'EOF' > /var/www/html/index.html
 <!DOCTYPE html>
 <html lang="my">
@@ -299,9 +290,8 @@ cat << 'EOF' > /var/www/html/index.html
                 <div id="topup-container" class="hidden">
                     <div class="bg-indigo-50 p-3 rounded-xl border border-indigo-100 flex items-center">
                         <input type="checkbox" id="topup-mode" class="w-5 h-5 text-indigo-600 rounded focus:ring-indigo-500 border-gray-300">
-                        <label for="topup-mode" class="ml-3 block text-sm font-bold text-indigo-900">Reset & Top Up (Sync)</label>
+                        <label for="topup-mode" class="ml-3 block text-sm font-bold text-indigo-900">Reset & Top Up (Sync with Bot)</label>
                     </div>
-                    <p class="text-xs text-indigo-600 ml-8 mt-1">This will reset progress bar to 0 and add new plan.</p>
                 </div>
                 <div class="grid grid-cols-2 gap-4">
                     <div>
@@ -324,16 +314,16 @@ cat << 'EOF' > /var/www/html/index.html
     </div>
 
     <script>
+        // *** CONFIG & STATE ***
+        const nodeApi = `${window.location.protocol}//${window.location.hostname}:3000/api`;
         let serverList = []; 
         let globalAllKeys = []; 
         let globalUsageMap = {};
-        let globalOffsets = {}; // To store synced offsets
+        let globalOffsets = {}; // *** VPS SYNCED OFFSETS ***
         let refreshInterval;
         let payments = [], plans = [], resellerPlans = [], resellers = [], domainMap = [];
         let botToken = '', currentPort = 80;
         let editingResellerIndex = -1;
-
-        const nodeApi = `${window.location.protocol}//${window.location.hostname}:3000/api`;
 
         document.addEventListener('DOMContentLoaded', () => {
             lucide.createIcons();
@@ -345,7 +335,7 @@ cat << 'EOF' > /var/www/html/index.html
             }
         });
 
-        // ... (UI Helper Functions remain same) ...
+        // *** HELPER FUNCTIONS ***
         function switchTab(tabId) {
             document.querySelectorAll('.tab-content').forEach(el => el.classList.add('hidden'));
             document.querySelectorAll('.tab-btn.active').forEach(el => el.classList.remove('active'));
@@ -381,18 +371,20 @@ cat << 'EOF' > /var/www/html/index.html
             } catch(e) { return url; }
         }
 
-        // FETCH CONFIG + OFFSETS
+        function formatBytes(bytes) { if (!bytes || bytes === 0) return '0 B'; const i = parseInt(Math.floor(Math.log(bytes) / Math.log(1024))); return (bytes / Math.pow(1024, i)).toFixed(2) + ' ' + ['B', 'KB', 'MB', 'GB', 'TB'][i]; }
+
+        // *** FETCH DATA ***
         async function fetchServerConfig() {
             try {
                 const res = await fetch(`${nodeApi}/config`);
                 if(!res.ok) throw new Error("Failed");
                 const config = await res.json();
                 
-                // Fetch Offsets from VPS (Synced with Bot)
+                // *** FETCH SYNCED OFFSETS FROM BACKEND ***
                 try {
                     const offRes = await fetch(`${nodeApi}/offsets`);
                     globalOffsets = await offRes.json();
-                } catch(e) { console.log("Offset fetch failed"); }
+                } catch(e) { console.warn("Offsets sync fail"); }
 
                 let rawUrls = config.api_urls || [];
                 serverList = [];
@@ -406,7 +398,6 @@ cat << 'EOF' > /var/www/html/index.html
                 renderServerList();
                 updateFilterOptions(); 
 
-                // ... (Load other config items) ...
                 payments = config.payments || [];
                 plans = config.plans || [];
                 resellerPlans = config.reseller_plans || [];
@@ -415,7 +406,7 @@ cat << 'EOF' > /var/www/html/index.html
                 botToken = config.bot_token || '';
                 currentPort = config.panel_port || 80;
 
-                // Populate Settings Inputs
+                // Set Config Inputs
                 document.getElementById('conf-bot-token').value = config.bot_token || '';
                 document.getElementById('conf-tg-id').value = config.admin_id || '';
                 document.getElementById('conf-admin-user').value = config.admin_username || '';
@@ -432,6 +423,7 @@ cat << 'EOF' > /var/www/html/index.html
                 document.getElementById('btn-info').value = btns.info || "👤 Account Info (အကောင့်စစ်ရန်)";
                 document.getElementById('btn-support').value = btns.support || "🆘 Support (ဆက်သွယ်ရန်)";
                 document.getElementById('btn-reseller').value = btns.reseller || "🤝 Reseller Login";
+                
                 document.getElementById('btn-resell-buy').value = btns.resell_buy || "🛒 Buy Stock";
                 document.getElementById('btn-resell-create').value = btns.resell_create || "📦 Create User Key";
                 document.getElementById('btn-resell-users').value = btns.resell_users || "👥 My Users";
@@ -471,12 +463,14 @@ cat << 'EOF' > /var/www/html/index.html
             }
 
             filteredKeys.forEach(k => {
-                // FIXED: Use Synced Offset Logic
+                // *** AGGREGATE DISPLAY USAGE ***
                 const compositeId = `${k._serverUrl}::${k.id}`;
-                const rawUsed = globalUsageMap[compositeId] || 0; 
-                const offset = globalOffsets[k.id] || 0;
+                const rawUsage = globalUsageMap[compositeId] || 0; 
+                let offset = globalOffsets[k.id] || 0; // FROM SERVER
                 
-                const displayUsed = Math.max(0, rawUsed - offset);
+                if(rawUsage < offset) offset = 0; // Reset safe
+
+                const displayUsed = Math.max(0, rawUsage - offset);
                 totalBytes += displayUsed;
             });
 
@@ -499,7 +493,7 @@ cat << 'EOF' > /var/www/html/index.html
                 await fetchServerConfig();
                 startAutoRefresh();
             } catch (error) { 
-                showToast("Connection Failed", "Check URL & SSL. Ensure CORS is enabled if testing locally.", "error"); 
+                showToast("Connection Failed", "Check URL & SSL.", "error"); 
                 btn.innerHTML = originalContent; btn.disabled = false; 
             }
         }
@@ -508,14 +502,15 @@ cat << 'EOF' > /var/www/html/index.html
 
         async function refreshData() {
             if(serverList.length === 0) return;
-            let allKeys = [];
             
-            // Re-fetch offsets every cycle to stay synced with Bot
+            // *** 1. ALWAYS SYNC OFFSETS FROM BACKEND FIRST ***
             try {
                 const offRes = await fetch(`${nodeApi}/offsets`);
                 globalOffsets = await offRes.json();
             } catch(e) {}
 
+            let allKeys = [];
+            
             const promises = serverList.map(async (srv) => {
                  try {
                      const url = srv.url;
@@ -539,7 +534,6 @@ cat << 'EOF' > /var/www/html/index.html
                 if(res) {
                     allKeys = allKeys.concat(res.keys);
                     
-                    // Map raw usage
                     Object.entries(res.metrics).forEach(([k, v]) => { 
                         globalUsageMap[`${res.serverUrl}::${k}`] = v; 
                     });
@@ -565,8 +559,6 @@ cat << 'EOF' > /var/www/html/index.html
             applyFilter(); 
         }
 
-        function formatBytes(bytes) { if (!bytes || bytes === 0) return '0 B'; const i = parseInt(Math.floor(Math.log(bytes) / Math.log(1024))); return (bytes / Math.pow(1024, i)).toFixed(2) + ' ' + ['B', 'KB', 'MB', 'GB', 'TB'][i]; }
-
         async function renderDashboard(keys, usageMap) {
             const list = document.getElementById('keys-list'); list.innerHTML = '';
             keys.sort((a,b) => parseInt(a.id) - parseInt(b.id));
@@ -576,19 +568,14 @@ cat << 'EOF' > /var/www/html/index.html
                 const serverUrl = key._serverUrl; 
                 const compositeId = `${serverUrl}::${key.id}`;
                 
-                // *** DISPLAY LOGIC (SYNCED) ***
-                let offset = globalOffsets[key.id] || 0;
-                
+                // *** DISPLAY LOGIC (SERVER SYNCED) ***
                 const rawLimit = key.dataLimit ? key.dataLimit.bytes : 0; 
                 const rawUsage = usageMap[compositeId] || 0;
                 
-                // Safety: Server Reset
-                if (rawUsage < offset) offset = 0; 
-
-                // 1. Used = Raw - Offset
-                const displayUsed = Math.max(0, rawUsage - offset);
+                let offset = globalOffsets[key.id] || 0;
+                if(rawUsage < offset) offset = 0; // Reset check
                 
-                // 2. Limit = RawLimit - Offset (Because Server Limit includes the offset)
+                const displayUsed = Math.max(0, rawUsage - offset);
                 let displayLimit = 0; 
                 if (rawLimit > 0) displayLimit = Math.max(0, rawLimit - offset);
                 
@@ -598,13 +585,7 @@ cat << 'EOF' > /var/www/html/index.html
                 
                 let statusBadge, cardClass, progressBarColor, percentage = 0, switchState = true;
                 if (isBlocked) { switchState = false; percentage = 100; progressBarColor = 'bg-slate-300'; cardClass = 'border-slate-200 bg-slate-50 opacity-90'; statusBadge = isExpired ? `<span class="text-xs font-bold text-slate-500">Expired</span>` : (isDataExhausted ? `<span class="text-xs font-bold text-red-500">Data Full</span>` : `<span class="text-xs font-bold text-slate-500">Disabled</span>`); }
-                else { 
-                    cardClass = 'border-slate-200 bg-white'; 
-                    // Calculate Percentage based on Display Values
-                    percentage = displayLimit > 0 ? Math.min((displayUsed / displayLimit) * 100, 100) : 5; 
-                    progressBarColor = percentage > 90 ? 'bg-orange-500' : (displayLimit > 0 ? 'bg-indigo-500' : 'bg-emerald-500'); 
-                    statusBadge = `<span class="text-xs font-bold text-emerald-600">Active</span>`; 
-                }
+                else { cardClass = 'border-slate-200 bg-white'; percentage = displayLimit > 0 ? Math.min((displayUsed / displayLimit) * 100, 100) : 5; progressBarColor = percentage > 90 ? 'bg-orange-500' : (displayLimit > 0 ? 'bg-indigo-500' : 'bg-emerald-500'); statusBadge = `<span class="text-xs font-bold text-emerald-600">Active</span>`; }
 
                 let finalAccessUrl = formatAccessUrl(key.accessUrl, serverUrl); 
                 if(key.name) finalAccessUrl = `${finalAccessUrl.split('#')[0]}#${encodeURIComponent(displayName)}`;
@@ -639,6 +620,7 @@ cat << 'EOF' > /var/www/html/index.html
         async function toggleKey(id, isBlocked, serverUrlEnc) { const url = decodeURIComponent(serverUrlEnc); try { if(isBlocked) await fetch(`${url}/access-keys/${id}/data-limit`, { method: 'DELETE' }); else await fetch(`${url}/access-keys/${id}/data-limit`, { method: 'PUT', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ limit: { bytes: 1 } }) }); showToast(isBlocked ? "Enabled" : "Disabled", isBlocked ? "Key activated" : "Key blocked"); refreshData(); } catch(e) { showToast("Error", "Action failed", 'error'); } }
         async function deleteKey(id, serverUrlEnc) { const url = decodeURIComponent(serverUrlEnc); if(!confirm("Delete this key?")) return; try { await fetch(`${url}/access-keys/${id}`, { method: 'DELETE' }); showToast("Deleted", "Key removed"); refreshData(); } catch(e) { showToast("Error", "Delete failed", 'error'); } }
 
+        // ... (Payment, Plans, Reseller, Server, Domain Add/Remove Functions same as before - omitted for length but assumed present in logic) ...
         function addPayment() { const name = document.getElementById('pay-name').value.trim(); const num = document.getElementById('pay-num').value.trim(); const owner = document.getElementById('pay-owner').value.trim(); if(!name || !num) return showToast("Info Missing", "Name and Number required", "warn"); payments.push({ name, num, owner }); renderPayments(); document.getElementById('pay-name').value = ''; document.getElementById('pay-num').value = ''; document.getElementById('pay-owner').value = ''; }
         function removePayment(index) { payments.splice(index, 1); renderPayments(); }
         function renderPayments() { const list = document.getElementById('payment-list'); list.innerHTML = ''; if(payments.length === 0) list.innerHTML = '<div class="text-center text-slate-400 text-xs py-2">No payment methods added.</div>'; payments.forEach((p, idx) => { const item = document.createElement('div'); item.className = 'flex justify-between items-center bg-white p-3 rounded-lg border border-slate-100 shadow-sm'; item.innerHTML = `<div class="flex items-center space-x-3"><div class="bg-emerald-100 text-emerald-600 p-2 rounded-full"><i data-lucide="wallet" class="w-4 h-4"></i></div><div><p class="text-sm font-bold text-slate-800">${p.name}</p><p class="text-xs text-slate-500 font-mono">${p.num} ${p.owner ? `(${p.owner})` : ''}</p></div></div><button onclick="removePayment(${idx})" class="text-slate-300 hover:text-red-500"><i data-lucide="trash" class="w-4 h-4"></i></button>`; list.appendChild(item); }); lucide.createIcons(); }
@@ -646,52 +628,14 @@ cat << 'EOF' > /var/www/html/index.html
         function addPlan() { const days = document.getElementById('plan-days').value; const gb = document.getElementById('plan-gb').value; const price = document.getElementById('plan-price').value; if(!days || !gb || !price) return showToast("Info Missing", "Fill all plan details", "warn"); plans.push({ days, gb, price }); renderPlans(); document.getElementById('plan-days').value = ''; document.getElementById('plan-gb').value = ''; document.getElementById('plan-price').value = ''; }
         function removePlan(index) { plans.splice(index, 1); renderPlans(); }
         function renderPlans() { const list = document.getElementById('plan-list'); list.innerHTML = ''; if(plans.length === 0) list.innerHTML = '<div class="text-center text-slate-400 text-xs py-2">No plans added.</div>'; plans.forEach((p, idx) => { const item = document.createElement('div'); item.className = 'flex justify-between items-center bg-white p-3 rounded-lg border border-slate-100 shadow-sm'; item.innerHTML = `<div class="flex items-center space-x-3 w-full"><div class="bg-blue-100 text-blue-600 p-2 rounded-full flex-shrink-0"><i data-lucide="zap" class="w-4 h-4"></i></div><div class="flex justify-between w-full pr-4"><div class="text-sm font-bold text-slate-800 w-1/3">${p.days} Days</div><div class="text-sm font-bold text-slate-600 w-1/3 text-center">${p.gb}</div><div class="text-sm font-bold text-emerald-600 w-1/3 text-right">${p.price} Ks</div></div></div><button onclick="removePlan(${idx})" class="text-slate-300 hover:text-red-500 flex-shrink-0"><i data-lucide="trash" class="w-4 h-4"></i></button>`; list.appendChild(item); }); lucide.createIcons(); }
-        
-        function addServer() {
-            const name = document.getElementById('new-server-name').value.trim();
-            const url = document.getElementById('new-server-url').value.trim();
-            if(!url) return showToast("Missing", "API URL is required", "warn");
-            serverList.push({ name: name || "Server", url: url });
-            renderServerList();
-            document.getElementById('new-server-name').value = '';
-            document.getElementById('new-server-url').value = '';
-        }
-        function removeServer(index) { serverList.splice(index, 1); renderServerList(); }
-        function renderServerList() {
-            const list = document.getElementById('server-list-container'); list.innerHTML = '';
-            if(serverList.length === 0) list.innerHTML = '<div class="text-center text-slate-400 text-xs py-2">No servers configured.</div>';
-            serverList.forEach((s, idx) => {
-                const item = document.createElement('div');
-                item.className = 'flex justify-between items-center bg-white p-2 rounded-lg border border-slate-200 text-sm';
-                let displayName = s.name || "Server";
-                let displayUrl = s.url.substring(0, 25) + "...";
-                item.innerHTML = `<div class="flex items-center gap-2 overflow-hidden"><span class="bg-indigo-100 text-indigo-700 px-2 py-0.5 rounded text-xs font-bold whitespace-nowrap">${displayName}</span><span class="font-mono text-slate-500 text-xs truncate" title="${s.url}">${displayUrl}</span></div><button onclick="removeServer(${idx})" class="text-red-400 hover:text-red-600 ml-2"><i data-lucide="trash" class="w-4 h-4"></i></button>`;
-                list.appendChild(item);
-            });
-            lucide.createIcons();
-        }
 
-        function addDomainMap() {
-            const ip = document.getElementById('map-ip').value.trim();
-            const domain = document.getElementById('map-domain').value.trim();
-            if(!ip || !domain) return showToast("Missing", "IP and Domain required", "warn");
-            domainMap.push({ ip, domain });
-            renderDomainMap();
-            document.getElementById('map-ip').value = '';
-            document.getElementById('map-domain').value = '';
-        }
+        function addServer() { const name = document.getElementById('new-server-name').value.trim(); const url = document.getElementById('new-server-url').value.trim(); if(!url) return showToast("Missing", "API URL is required", "warn"); serverList.push({ name: name || "Server", url: url }); renderServerList(); document.getElementById('new-server-name').value = ''; document.getElementById('new-server-url').value = ''; }
+        function removeServer(index) { serverList.splice(index, 1); renderServerList(); }
+        function renderServerList() { const list = document.getElementById('server-list-container'); list.innerHTML = ''; if(serverList.length === 0) list.innerHTML = '<div class="text-center text-slate-400 text-xs py-2">No servers configured.</div>'; serverList.forEach((s, idx) => { const item = document.createElement('div'); item.className = 'flex justify-between items-center bg-white p-2 rounded-lg border border-slate-200 text-sm'; let displayName = s.name || "Server"; let displayUrl = s.url.substring(0, 25) + "..."; item.innerHTML = `<div class="flex items-center gap-2 overflow-hidden"><span class="bg-indigo-100 text-indigo-700 px-2 py-0.5 rounded text-xs font-bold whitespace-nowrap">${displayName}</span><span class="font-mono text-slate-500 text-xs truncate" title="${s.url}">${displayUrl}</span></div><button onclick="removeServer(${idx})" class="text-red-400 hover:text-red-600 ml-2"><i data-lucide="trash" class="w-4 h-4"></i></button>`; list.appendChild(item); }); lucide.createIcons(); }
+
+        function addDomainMap() { const ip = document.getElementById('map-ip').value.trim(); const domain = document.getElementById('map-domain').value.trim(); if(!ip || !domain) return showToast("Missing", "IP and Domain required", "warn"); domainMap.push({ ip, domain }); renderDomainMap(); document.getElementById('map-ip').value = ''; document.getElementById('map-domain').value = ''; }
         function removeDomainMap(index) { domainMap.splice(index, 1); renderDomainMap(); }
-        function renderDomainMap() {
-             const list = document.getElementById('domain-map-list'); list.innerHTML = '';
-             if(domainMap.length === 0) list.innerHTML = '<div class="text-center text-slate-400 text-xs py-2">No mappings added.</div>';
-             domainMap.forEach((m, idx) => {
-                 const item = document.createElement('div');
-                 item.className = 'flex justify-between items-center bg-white p-2 rounded-lg border border-slate-200 text-sm';
-                 item.innerHTML = `<div class="font-mono text-xs"><span class="text-indigo-600 font-bold">${m.ip}</span> <span class="text-slate-400">➜</span> <span class="font-bold text-slate-700">${m.domain}</span></div><button onclick="removeDomainMap(${idx})" class="text-red-400 hover:text-red-600"><i data-lucide="trash" class="w-4 h-4"></i></button>`;
-                 list.appendChild(item);
-             });
-             lucide.createIcons();
-        }
+        function renderDomainMap() { const list = document.getElementById('domain-map-list'); list.innerHTML = ''; if(domainMap.length === 0) list.innerHTML = '<div class="text-center text-slate-400 text-xs py-2">No mappings added.</div>'; domainMap.forEach((m, idx) => { const item = document.createElement('div'); item.className = 'flex justify-between items-center bg-white p-2 rounded-lg border border-slate-200 text-sm'; item.innerHTML = `<div class="font-mono text-xs"><span class="text-indigo-600 font-bold">${m.ip}</span> <span class="text-slate-400">➜</span> <span class="font-bold text-slate-700">${m.domain}</span></div><button onclick="removeDomainMap(${idx})" class="text-red-400 hover:text-red-600"><i data-lucide="trash" class="w-4 h-4"></i></button>`; list.appendChild(item); }); lucide.createIcons(); }
 
         function addResellerPlan() { const days = document.getElementById('rplan-days').value; const gb = document.getElementById('rplan-gb').value; const price = document.getElementById('rplan-price').value; if(!days || !gb || !price) return showToast("Info Missing", "Fill all plan details", "warn"); resellerPlans.push({ days, gb, price }); renderResellerPlans(); document.getElementById('rplan-days').value = ''; document.getElementById('rplan-gb').value = ''; document.getElementById('rplan-price').value = ''; }
         function removeResellerPlan(index) { resellerPlans.splice(index, 1); renderResellerPlans(); }
@@ -768,8 +712,6 @@ cat << 'EOF' > /var/www/html/index.html
             }
         }
 
-        function copyPaymentInfo() { let text = "➖➖ Payment Methods ➖➖\n"; payments.forEach(p => { text += `✅ ${p.name}: ${p.num} ${p.owner ? '('+p.owner+')' : ''}\n`; }); text += "\n➖➖ Available Plans ➖➖\n"; plans.forEach(p => { text += `💎 ${p.days} Days - ${p.gb} - ${p.price} Ks\n`; }); const temp = document.createElement('textarea'); temp.value = text; document.body.appendChild(temp); temp.select(); document.execCommand('copy'); document.body.removeChild(temp); showToast("Copied", "Info copied"); }
-
         const modal = document.getElementById('modal-overlay'); const modalContent = document.getElementById('modal-content');
         
         function openCreateModal() { 
@@ -794,26 +736,13 @@ cat << 'EOF' > /var/www/html/index.html
         }
         function closeModal() { modal.classList.add('opacity-0'); modalContent.classList.add('scale-95'); setTimeout(() => modal.classList.add('hidden'), 200); }
         
-        function editKey(id, name, date, url, limitBytes) { 
+        function editKey(id, name, date, displayBytes, serverUrlEnc) { 
+            const url = decodeURIComponent(serverUrlEnc);
             document.getElementById('key-id').value = id; 
             document.getElementById('key-server-url').value = url; 
             document.getElementById('server-select').parentElement.classList.add('hidden');
             
-            document.getElementById('key-name').value = name; document.getElementById('key-expire').value = date; 
-            document.getElementById('topup-container').classList.remove('hidden'); document.getElementById('topup-mode').checked = false; 
-            
-            if(limitBytes) {
-                 if (limitBytes >= 1073741824) { 
-                     document.getElementById('key-limit').value = (limitBytes / 1073741824).toFixed(2); 
-                     document.getElementById('key-unit').value = 'GB'; 
-                 } else { 
-                     document.getElementById('key-limit').value = (limitBytes / 1048576).toFixed(2); 
-                     document.getElementById('key-unit').value = 'MB'; 
-                 } 
-            } else { 
-                document.getElementById('key-limit').value = ''; 
-            } 
-            modal.classList.remove('hidden'); setTimeout(() => { modal.classList.remove('opacity-0'); modalContent.classList.remove('scale-95'); }, 10); lucide.createIcons(); 
+            document.getElementById('key-name').value = name; document.getElementById('key-expire').value = date; document.getElementById('topup-container').classList.remove('hidden'); document.getElementById('topup-mode').checked = false; if(displayBytes > 0) { if (displayBytes >= 1073741824) { document.getElementById('key-limit').value = (displayBytes / 1073741824).toFixed(2); document.getElementById('key-unit').value = 'GB'; } else { document.getElementById('key-limit').value = (displayBytes / 1048576).toFixed(2); document.getElementById('key-unit').value = 'MB'; } } else { document.getElementById('key-limit').value = ''; } modal.classList.remove('hidden'); setTimeout(() => { modal.classList.remove('opacity-0'); modalContent.classList.remove('scale-95'); }, 10); lucide.createIcons(); 
         }
         
         document.getElementById('key-form').addEventListener('submit', async (e) => { 
@@ -850,16 +779,17 @@ cat << 'EOF' > /var/www/html/index.html
                     
                     // *** SYNC LOGIC (VPS) ***
                     if (targetId && isTopUp) { 
-                        // Fetch Raw Usage
+                        // Fetch raw usage for offset
                         const mRes = await fetch(`${targetUrl}/metrics/transfer`);
                         const mData = await mRes.json();
                         const currentRaw = mData.bytesTransferredByUserId[targetId] || 0;
 
-                        // Sync Offset to VPS Server
+                        // SYNC OFFSET TO VPS
                         await fetch(`${nodeApi}/set-offset`, { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ keyId: targetId, offset: currentRaw }) });
                         
                         finalLimit = currentRaw + newQuota; 
                     } else if (targetId) { 
+                        // Existing Key Edit: Use existing offset
                         const offset = globalOffsets[targetId] || 0;
                         finalLimit = offset + newQuota; 
                     } 
@@ -880,5 +810,5 @@ EOF
 echo -e "${YELLOW}Restarting Nginx...${NC}"
 systemctl restart nginx
 
-echo -e "${GREEN}Frontend Installation Complete (With VPS Sync)!${NC}"
+echo -e "${GREEN}Frontend Installation Complete (Full UI + Sync)!${NC}"
 echo -e "Panel URL: http://$(curl -s ifconfig.me)"
