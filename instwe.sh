@@ -5,7 +5,7 @@ GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 NC='\033[0m'
 
-echo -e "${GREEN}=== VPN Shop Frontend Installer (Server Sync Mode) ===${NC}"
+echo -e "${GREEN}=== VPN Shop Frontend Installer (Full UI + VPS Sync Logic) ===${NC}"
 
 # 1. Check Root
 if [ "$EUID" -ne 0 ]; then
@@ -24,8 +24,8 @@ fi
 echo -e "${YELLOW}Clearing old frontend files...${NC}"
 rm -rf /var/www/html/*
 
-# 4. Create index.html with SERVER SYNC LOGIC
-echo -e "${YELLOW}Creating index.html with VPS Sync Logic...${NC}"
+# 4. Create index.html with FULL UI & SYNC LOGIC
+echo -e "${YELLOW}Creating index.html with Full Features & Sync Logic...${NC}"
 cat << 'EOF' > /var/www/html/index.html
 <!DOCTYPE html>
 <html lang="my">
@@ -57,7 +57,7 @@ cat << 'EOF' > /var/www/html/index.html
                 </div>
                 <div>
                     <h1 class="text-xl font-bold tracking-tight">VPN Shop</h1>
-                    <p class="text-[10px] text-slate-400 uppercase tracking-widest font-semibold">Manager Panel</p>
+                    <p class="text-[10px] text-slate-400 uppercase tracking-widest font-semibold">Manager Panel (Synced)</p>
                 </div>
             </div>
             <div id="nav-status" class="hidden flex items-center space-x-3">
@@ -84,7 +84,7 @@ cat << 'EOF' > /var/www/html/index.html
                 <form onsubmit="connectServer(event)" class="space-y-4">
                     <div>
                         <label class="block text-xs font-bold text-slate-500 uppercase mb-1 ml-1">Any API URL</label>
-                        <input type="password" id="login-api-url" class="w-full p-3 border border-slate-300 rounded-xl focus:ring-2 focus:ring-indigo-500 outline-none transition font-mono text-sm" placeholder="https://1.2.3.4:xxxxx/SecretKey..." required>
+                        <input type="password" id="login-api-url" class="w-full p-3 border border-slate-300 rounded-xl focus:ring-2 focus:ring-indigo-500 outline-none transition font-mono text-sm" placeholder="https://..." required>
                     </div>
                     <button type="submit" id="connect-btn" class="w-full bg-indigo-600 hover:bg-indigo-700 text-white py-3.5 rounded-xl font-bold shadow-lg shadow-indigo-200 transition flex justify-center items-center">
                         Connect
@@ -289,7 +289,7 @@ cat << 'EOF' > /var/www/html/index.html
             <form id="key-form" class="p-6 space-y-5">
                 <input type="hidden" id="key-id">
                 <input type="hidden" id="key-server-url"> 
-                <div>
+                <div id="server-select-div">
                      <label class="block text-xs font-bold text-slate-500 uppercase mb-1 ml-1">Server (Create Only)</label>
                      <select id="server-select" class="w-full p-3 border border-slate-300 rounded-xl outline-none text-sm bg-slate-50">
                          </select>
@@ -299,8 +299,9 @@ cat << 'EOF' > /var/www/html/index.html
                 <div id="topup-container" class="hidden">
                     <div class="bg-indigo-50 p-3 rounded-xl border border-indigo-100 flex items-center">
                         <input type="checkbox" id="topup-mode" class="w-5 h-5 text-indigo-600 rounded focus:ring-indigo-500 border-gray-300">
-                        <label for="topup-mode" class="ml-3 block text-sm font-bold text-indigo-900">Reset & Top Up (Sync with Bot)</label>
+                        <label for="topup-mode" class="ml-3 block text-sm font-bold text-indigo-900">Reset & Top Up (Sync)</label>
                     </div>
+                    <p class="text-xs text-indigo-600 ml-8 mt-1">This will reset progress bar to 0 and add new plan.</p>
                 </div>
                 <div class="grid grid-cols-2 gap-4">
                     <div>
@@ -326,7 +327,7 @@ cat << 'EOF' > /var/www/html/index.html
         let serverList = []; 
         let globalAllKeys = []; 
         let globalUsageMap = {};
-        let globalOffsets = {};
+        let globalOffsets = {}; // To store synced offsets
         let refreshInterval;
         let payments = [], plans = [], resellerPlans = [], resellers = [], domainMap = [];
         let botToken = '', currentPort = 80;
@@ -344,6 +345,7 @@ cat << 'EOF' > /var/www/html/index.html
             }
         });
 
+        // ... (UI Helper Functions remain same) ...
         function switchTab(tabId) {
             document.querySelectorAll('.tab-content').forEach(el => el.classList.add('hidden'));
             document.querySelectorAll('.tab-btn.active').forEach(el => el.classList.remove('active'));
@@ -379,12 +381,19 @@ cat << 'EOF' > /var/www/html/index.html
             } catch(e) { return url; }
         }
 
+        // FETCH CONFIG + OFFSETS
         async function fetchServerConfig() {
             try {
                 const res = await fetch(`${nodeApi}/config`);
                 if(!res.ok) throw new Error("Failed");
                 const config = await res.json();
                 
+                // Fetch Offsets from VPS (Synced with Bot)
+                try {
+                    const offRes = await fetch(`${nodeApi}/offsets`);
+                    globalOffsets = await offRes.json();
+                } catch(e) { console.log("Offset fetch failed"); }
+
                 let rawUrls = config.api_urls || [];
                 serverList = [];
                 rawUrls.forEach(item => {
@@ -397,6 +406,7 @@ cat << 'EOF' > /var/www/html/index.html
                 renderServerList();
                 updateFilterOptions(); 
 
+                // ... (Load other config items) ...
                 payments = config.payments || [];
                 plans = config.plans || [];
                 resellerPlans = config.reseller_plans || [];
@@ -405,6 +415,7 @@ cat << 'EOF' > /var/www/html/index.html
                 botToken = config.bot_token || '';
                 currentPort = config.panel_port || 80;
 
+                // Populate Settings Inputs
                 document.getElementById('conf-bot-token').value = config.bot_token || '';
                 document.getElementById('conf-tg-id').value = config.admin_id || '';
                 document.getElementById('conf-admin-user').value = config.admin_username || '';
@@ -421,7 +432,6 @@ cat << 'EOF' > /var/www/html/index.html
                 document.getElementById('btn-info').value = btns.info || "👤 Account Info (အကောင့်စစ်ရန်)";
                 document.getElementById('btn-support').value = btns.support || "🆘 Support (ဆက်သွယ်ရန်)";
                 document.getElementById('btn-reseller').value = btns.reseller || "🤝 Reseller Login";
-                
                 document.getElementById('btn-resell-buy').value = btns.resell_buy || "🛒 Buy Stock";
                 document.getElementById('btn-resell-create').value = btns.resell_create || "📦 Create User Key";
                 document.getElementById('btn-resell-users').value = btns.resell_users || "👥 My Users";
@@ -461,12 +471,13 @@ cat << 'EOF' > /var/www/html/index.html
             }
 
             filteredKeys.forEach(k => {
+                // FIXED: Use Synced Offset Logic
                 const compositeId = `${k._serverUrl}::${k.id}`;
-                const used = globalUsageMap[compositeId] || 0; 
+                const rawUsed = globalUsageMap[compositeId] || 0; 
                 const offset = globalOffsets[k.id] || 0;
-                // Calculate display usage for total
-                const display = Math.max(0, used - offset);
-                totalBytes += display;
+                
+                const displayUsed = Math.max(0, rawUsed - offset);
+                totalBytes += displayUsed;
             });
 
             document.getElementById('total-keys').textContent = filteredKeys.length;
@@ -499,7 +510,7 @@ cat << 'EOF' > /var/www/html/index.html
             if(serverList.length === 0) return;
             let allKeys = [];
             
-            // 1. Fetch Offsets from VPS Server
+            // Re-fetch offsets every cycle to stay synced with Bot
             try {
                 const offRes = await fetch(`${nodeApi}/offsets`);
                 globalOffsets = await offRes.json();
@@ -528,6 +539,7 @@ cat << 'EOF' > /var/www/html/index.html
                 if(res) {
                     allKeys = allKeys.concat(res.keys);
                     
+                    // Map raw usage
                     Object.entries(res.metrics).forEach(([k, v]) => { 
                         globalUsageMap[`${res.serverUrl}::${k}`] = v; 
                     });
@@ -564,15 +576,21 @@ cat << 'EOF' > /var/www/html/index.html
                 const serverUrl = key._serverUrl; 
                 const compositeId = `${serverUrl}::${key.id}`;
                 
-                // Changed: Get offset from Global (Synced with VPS), fallback to 0
-                const usageOffset = globalOffsets[key.id] || 0;
+                // *** DISPLAY LOGIC (SYNCED) ***
+                let offset = globalOffsets[key.id] || 0;
                 
                 const rawLimit = key.dataLimit ? key.dataLimit.bytes : 0; 
                 const rawUsage = usageMap[compositeId] || 0;
                 
-                let displayUsed = Math.max(0, rawUsage - usageOffset); 
+                // Safety: Server Reset
+                if (rawUsage < offset) offset = 0; 
+
+                // 1. Used = Raw - Offset
+                const displayUsed = Math.max(0, rawUsage - offset);
+                
+                // 2. Limit = RawLimit - Offset (Because Server Limit includes the offset)
                 let displayLimit = 0; 
-                if (rawLimit > 0) displayLimit = Math.max(0, rawLimit - usageOffset);
+                if (rawLimit > 0) displayLimit = Math.max(0, rawLimit - offset);
                 
                 let displayName = key.name || 'No Name'; let rawName = displayName; let expireDate = null;
                 if (displayName.includes('|')) { const parts = displayName.split('|'); rawName = parts[0].trim(); const potentialDate = parts[parts.length - 1].trim(); if (/^\d{4}-\d{2}-\d{2}$/.test(potentialDate)) expireDate = potentialDate; }
@@ -580,7 +598,13 @@ cat << 'EOF' > /var/www/html/index.html
                 
                 let statusBadge, cardClass, progressBarColor, percentage = 0, switchState = true;
                 if (isBlocked) { switchState = false; percentage = 100; progressBarColor = 'bg-slate-300'; cardClass = 'border-slate-200 bg-slate-50 opacity-90'; statusBadge = isExpired ? `<span class="text-xs font-bold text-slate-500">Expired</span>` : (isDataExhausted ? `<span class="text-xs font-bold text-red-500">Data Full</span>` : `<span class="text-xs font-bold text-slate-500">Disabled</span>`); }
-                else { cardClass = 'border-slate-200 bg-white'; percentage = displayLimit > 0 ? Math.min((displayUsed / displayLimit) * 100, 100) : 5; progressBarColor = percentage > 90 ? 'bg-orange-500' : (displayLimit > 0 ? 'bg-indigo-500' : 'bg-emerald-500'); statusBadge = `<span class="text-xs font-bold text-emerald-600">Active</span>`; }
+                else { 
+                    cardClass = 'border-slate-200 bg-white'; 
+                    // Calculate Percentage based on Display Values
+                    percentage = displayLimit > 0 ? Math.min((displayUsed / displayLimit) * 100, 100) : 5; 
+                    progressBarColor = percentage > 90 ? 'bg-orange-500' : (displayLimit > 0 ? 'bg-indigo-500' : 'bg-emerald-500'); 
+                    statusBadge = `<span class="text-xs font-bold text-emerald-600">Active</span>`; 
+                }
 
                 let finalAccessUrl = formatAccessUrl(key.accessUrl, serverUrl); 
                 if(key.name) finalAccessUrl = `${finalAccessUrl.split('#')[0]}#${encodeURIComponent(displayName)}`;
@@ -613,7 +637,7 @@ cat << 'EOF' > /var/www/html/index.html
         }
 
         async function toggleKey(id, isBlocked, serverUrlEnc) { const url = decodeURIComponent(serverUrlEnc); try { if(isBlocked) await fetch(`${url}/access-keys/${id}/data-limit`, { method: 'DELETE' }); else await fetch(`${url}/access-keys/${id}/data-limit`, { method: 'PUT', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ limit: { bytes: 1 } }) }); showToast(isBlocked ? "Enabled" : "Disabled", isBlocked ? "Key activated" : "Key blocked"); refreshData(); } catch(e) { showToast("Error", "Action failed", 'error'); } }
-        async function deleteKey(id, serverUrlEnc) { const url = decodeURIComponent(serverUrlEnc); if(!confirm("Delete this key?")) return; try { await fetch(`${url}/access-keys/${id}`, { method: 'DELETE' }); localStorage.removeItem(`offset_${id}`); showToast("Deleted", "Key removed"); refreshData(); } catch(e) { showToast("Error", "Delete failed", 'error'); } }
+        async function deleteKey(id, serverUrlEnc) { const url = decodeURIComponent(serverUrlEnc); if(!confirm("Delete this key?")) return; try { await fetch(`${url}/access-keys/${id}`, { method: 'DELETE' }); showToast("Deleted", "Key removed"); refreshData(); } catch(e) { showToast("Error", "Delete failed", 'error'); } }
 
         function addPayment() { const name = document.getElementById('pay-name').value.trim(); const num = document.getElementById('pay-num').value.trim(); const owner = document.getElementById('pay-owner').value.trim(); if(!name || !num) return showToast("Info Missing", "Name and Number required", "warn"); payments.push({ name, num, owner }); renderPayments(); document.getElementById('pay-name').value = ''; document.getElementById('pay-num').value = ''; document.getElementById('pay-owner').value = ''; }
         function removePayment(index) { payments.splice(index, 1); renderPayments(); }
@@ -687,7 +711,7 @@ cat << 'EOF' > /var/www/html/index.html
             await fetchServerConfig();
             document.getElementById('settings-loader').classList.add('hidden');
             document.getElementById('settings-body').classList.remove('hidden');
-            switchTab('server'); // Default Tab
+            switchTab('server'); 
         }
         function closeSettingsModal() { settingsOverlay.classList.add('opacity-0'); settingsContent.classList.add('scale-95'); setTimeout(() => settingsOverlay.classList.add('hidden'), 200); }
         
@@ -716,8 +740,6 @@ cat << 'EOF' > /var/www/html/index.html
                     info: document.getElementById('btn-info').value,
                     support: document.getElementById('btn-support').value,
                     reseller: document.getElementById('btn-reseller').value,
-                    
-                    // --- SAVE NEW BUTTONS ---
                     resell_buy: document.getElementById('btn-resell-buy').value,
                     resell_create: document.getElementById('btn-resell-create').value,
                     resell_users: document.getElementById('btn-resell-users').value,
@@ -772,13 +794,26 @@ cat << 'EOF' > /var/www/html/index.html
         }
         function closeModal() { modal.classList.add('opacity-0'); modalContent.classList.add('scale-95'); setTimeout(() => modal.classList.add('hidden'), 200); }
         
-        function editKey(id, name, date, displayBytes, serverUrlEnc) { 
-            const url = decodeURIComponent(serverUrlEnc);
+        function editKey(id, name, date, url, limitBytes) { 
             document.getElementById('key-id').value = id; 
             document.getElementById('key-server-url').value = url; 
             document.getElementById('server-select').parentElement.classList.add('hidden');
             
-            document.getElementById('key-name').value = name; document.getElementById('key-expire').value = date; document.getElementById('topup-container').classList.remove('hidden'); document.getElementById('topup-mode').checked = false; if(displayBytes > 0) { if (displayBytes >= 1073741824) { document.getElementById('key-limit').value = (displayBytes / 1073741824).toFixed(2); document.getElementById('key-unit').value = 'GB'; } else { document.getElementById('key-limit').value = (displayBytes / 1048576).toFixed(2); document.getElementById('key-unit').value = 'MB'; } } else { document.getElementById('key-limit').value = ''; } modal.classList.remove('hidden'); setTimeout(() => { modal.classList.remove('opacity-0'); modalContent.classList.remove('scale-95'); }, 10); lucide.createIcons(); 
+            document.getElementById('key-name').value = name; document.getElementById('key-expire').value = date; 
+            document.getElementById('topup-container').classList.remove('hidden'); document.getElementById('topup-mode').checked = false; 
+            
+            if(limitBytes) {
+                 if (limitBytes >= 1073741824) { 
+                     document.getElementById('key-limit').value = (limitBytes / 1073741824).toFixed(2); 
+                     document.getElementById('key-unit').value = 'GB'; 
+                 } else { 
+                     document.getElementById('key-limit').value = (limitBytes / 1048576).toFixed(2); 
+                     document.getElementById('key-unit').value = 'MB'; 
+                 } 
+            } else { 
+                document.getElementById('key-limit').value = ''; 
+            } 
+            modal.classList.remove('hidden'); setTimeout(() => { modal.classList.remove('opacity-0'); modalContent.classList.remove('scale-95'); }, 10); lucide.createIcons(); 
         }
         
         document.getElementById('key-form').addEventListener('submit', async (e) => { 
@@ -805,7 +840,7 @@ cat << 'EOF' > /var/www/html/index.html
                     const data = await res.json(); 
                     targetId = data.id; 
                     
-                    // NEW KEY: Init offset to 0 on server
+                    // NEW KEY: INIT OFFSET TO 0 ON VPS
                     await fetch(`${nodeApi}/set-offset`, { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ keyId: targetId, offset: 0 }) });
                 } 
                 await fetch(`${targetUrl}/access-keys/${targetId}/name`, { method: 'PUT', headers: {'Content-Type': 'application/x-www-form-urlencoded'}, body: `name=${encodeURIComponent(name)}` }); 
@@ -813,18 +848,18 @@ cat << 'EOF' > /var/www/html/index.html
                     let newQuota = (unit === 'GB') ? Math.floor(inputVal * 1024 * 1024 * 1024) : Math.floor(inputVal * 1024 * 1024); 
                     let finalLimit = newQuota; 
                     
+                    // *** SYNC LOGIC (VPS) ***
                     if (targetId && isTopUp) { 
-                        // Fetch raw usage for offset
+                        // Fetch Raw Usage
                         const mRes = await fetch(`${targetUrl}/metrics/transfer`);
                         const mData = await mRes.json();
                         const currentRaw = mData.bytesTransferredByUserId[targetId] || 0;
 
-                        // SYNC OFFSET TO VPS
+                        // Sync Offset to VPS Server
                         await fetch(`${nodeApi}/set-offset`, { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ keyId: targetId, offset: currentRaw }) });
                         
                         finalLimit = currentRaw + newQuota; 
                     } else if (targetId) { 
-                        // Existing Key Edit: Use existing offset
                         const offset = globalOffsets[targetId] || 0;
                         finalLimit = offset + newQuota; 
                     } 
@@ -845,5 +880,5 @@ EOF
 echo -e "${YELLOW}Restarting Nginx...${NC}"
 systemctl restart nginx
 
-echo -e "${GREEN}Frontend Installation Complete (With ID Fixes)!${NC}"
+echo -e "${GREEN}Frontend Installation Complete (With VPS Sync)!${NC}"
 echo -e "Panel URL: http://$(curl -s ifconfig.me)"
