@@ -6,7 +6,7 @@ GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 NC='\033[0m'
 
-echo -e "${GREEN}=== VPN Shop Bot Installer (With 'Reset & Top Up' Logic) ===${NC}"
+echo -e "${GREEN}=== VPN Shop Backend Installer (With Sync & Reset Logic) ===${NC}"
 
 # 1. Check Root
 if [ "$EUID" -ne 0 ]; then
@@ -34,8 +34,8 @@ if command -v pm2 &> /dev/null; then
     pm2 delete vpn-shop 2>/dev/null
 fi
 
-# 6. Create backend files (bot.js) with RESET & TOP UP Logic
-echo -e "${YELLOW}Creating Backend Files...${NC}"
+# 6. Create backend files (bot.js) with RESET & TOP UP Logic + API
+echo -e "${YELLOW}Creating Backend Files (Synced Logic)...${NC}"
 cat << 'EOF' > /root/vpn-shop/bot.js
 const express = require('express');
 const cors = require('cors');
@@ -56,7 +56,7 @@ const CLAIM_FILE = 'claimed_users.json';
 const BLOCKED_FILE = 'blocked_registry.json';
 const RESELLER_FILE = 'resellers.json';
 const ALL_USERS_FILE = 'all_users.json';
-const OFFSET_FILE = 'usage_offsets.json'; // New file to store reset points
+const OFFSET_FILE = 'usage_offsets.json'; // *** NEW: Reset Database ***
 
 let config = {};
 let bot = null;
@@ -66,9 +66,8 @@ let userStates = {};
 let resellers = [];
 let resellerSessions = {}; 
 let allUsers = []; 
-let usageOffsets = {}; // Memory storage for offsets
+let usageOffsets = {}; // *** NEW: Memory Cache ***
 
-// Prevent overlap
 let isGuardianRunning = false;
 
 const agent = new https.Agent({ rejectUnauthorized: false });
@@ -84,11 +83,50 @@ function loadConfig() {
 }
 loadConfig();
 
+// *** CRITICAL: SAVE OFFSET FUNCTION ***
 function saveOffsets() {
     try { fs.writeFileSync(OFFSET_FILE, JSON.stringify(usageOffsets, null, 4)); } catch(e) {}
 }
 
-// --- SERVER HELPER FUNCTIONS ---
+// --- API ROUTES FOR SYNC ---
+app.get('/api/offsets', (req, res) => {
+    try { if(fs.existsSync(OFFSET_FILE)) usageOffsets = JSON.parse(fs.readFileSync(OFFSET_FILE)); } catch(e) {}
+    res.json(usageOffsets);
+});
+
+app.post('/api/set-offset', (req, res) => {
+    const { keyId, offset } = req.body;
+    if (keyId) {
+        usageOffsets[keyId] = parseInt(offset) || 0;
+        saveOffsets();
+        res.json({ success: true });
+    } else {
+        res.status(400).json({ error: "Missing keyId" });
+    }
+});
+
+app.get('/api/config', (req, res) => { loadConfig(); res.json({ ...config, resellers }); });
+
+app.post('/api/update-config', (req, res) => {
+    try {
+        const { resellers: newResellers, ...newConfig } = req.body;
+        config = { ...config, ...newConfig };
+        fs.writeFileSync(CONFIG_FILE, JSON.stringify(config, null, 4));
+        if(newResellers) { resellers = newResellers; fs.writeFileSync(RESELLER_FILE, JSON.stringify(resellers, null, 4)); }
+        res.json({ success: true, config: config });
+        setTimeout(() => { loadConfig(); startBot(); }, 1000);
+    } catch (error) { res.status(500).json({ success: false }); }
+});
+
+app.post('/api/change-port', (req, res) => {
+    const newPort = req.body.port;
+    if(!newPort || isNaN(newPort)) return res.status(400).json({error: "Invalid Port"});
+    const nginxConfig = `server { listen ${newPort}; server_name _; root /var/www/html; index index.html; location / { try_files $uri $uri/ =404; } }`;
+    try { fs.writeFileSync('/etc/nginx/sites-available/default', nginxConfig); config.panel_port = parseInt(newPort); fs.writeFileSync(CONFIG_FILE, JSON.stringify(config, null, 4)); exec('systemctl reload nginx', (error) => { if (error) { return res.status(500).json({error: "Failed to reload Nginx"}); } res.json({ success: true, message: `Port changed to ${newPort}` }); }); } catch (err) { res.status(500).json({ error: "Failed to write config" }); }
+});
+app.listen(3000, () => console.log('✅ Sync Server running on Port 3000'));
+
+// --- BOT HELPER FUNCTIONS ---
 function getServers() {
     if (!config.api_urls) return [];
     return config.api_urls.map(s => {
@@ -113,22 +151,20 @@ function getServerKeyboard(callbackPrefix) {
     return keyboard;
 }
 
-// *** CORE LOGIC FOR DISPLAY USAGE (OFFSET) ***
+// *** DISPLAY DATA LOGIC (Raw - Offset) ***
 function getDisplayData(keyId, rawUsage, rawLimit) {
     let offset = usageOffsets[keyId] || 0;
     
-    // Safety check: If server reset (rawUsage < offset), reset offset
+    // Safety check: If server reset (rawUsage < offset), reset offset to 0
     if (rawUsage < offset) {
         offset = 0;
         usageOffsets[keyId] = 0;
         saveOffsets();
     }
 
-    const displayUsed = rawUsage - offset;
-    let displayLimit = 0;
+    const displayUsed = Math.max(0, rawUsage - offset);
     
-    // If there is a limit, the real limit on server is (offset + plan_limit)
-    // So display limit is (rawLimit - offset)
+    let displayLimit = 0;
     if (rawLimit > 0) {
         displayLimit = Math.max(0, rawLimit - offset);
     }
@@ -192,34 +228,12 @@ async function createKeyOnServer(serverIndex, name, limitBytes) {
     await axiosClient.put(`${targetServer.url}/access-keys/${res.data.id}/name`, { name: name });
     await axiosClient.put(`${targetServer.url}/access-keys/${res.data.id}/data-limit`, { limit: { bytes: limitBytes } });
     
-    // Initialize Offset to 0
+    // *** NEW KEY: Init Offset 0 ***
     usageOffsets[res.data.id] = 0;
     saveOffsets();
 
     return { ...res.data, _serverUrl: targetServer.url, _serverName: targetServer.name };
 }
-
-// --- API ROUTES ---
-app.get('/api/config', (req, res) => { loadConfig(); res.json({ ...config, resellers }); });
-
-app.post('/api/update-config', (req, res) => {
-    try {
-        const { resellers: newResellers, ...newConfig } = req.body;
-        config = { ...config, ...newConfig };
-        fs.writeFileSync(CONFIG_FILE, JSON.stringify(config, null, 4));
-        if(newResellers) { resellers = newResellers; fs.writeFileSync(RESELLER_FILE, JSON.stringify(resellers, null, 4)); }
-        res.json({ success: true, config: config });
-        setTimeout(() => { loadConfig(); startBot(); }, 1000);
-    } catch (error) { res.status(500).json({ success: false }); }
-});
-
-app.post('/api/change-port', (req, res) => {
-    const newPort = req.body.port;
-    if(!newPort || isNaN(newPort)) return res.status(400).json({error: "Invalid Port"});
-    const nginxConfig = `server { listen ${newPort}; server_name _; root /var/www/html; index index.html; location / { try_files $uri $uri/ =404; } }`;
-    try { fs.writeFileSync('/etc/nginx/sites-available/default', nginxConfig); config.panel_port = parseInt(newPort); fs.writeFileSync(CONFIG_FILE, JSON.stringify(config, null, 4)); exec('systemctl reload nginx', (error) => { if (error) { return res.status(500).json({error: "Failed to reload Nginx"}); } res.json({ success: true, message: `Port changed to ${newPort}` }); }); } catch (err) { res.status(500).json({ error: "Failed to write config" }); }
-});
-app.listen(3000, () => console.log('✅ Sync Server running on Port 3000'));
 
 if (config.bot_token && config.api_urls && config.api_urls.length > 0) startBot();
 
@@ -231,17 +245,17 @@ function startBot() {
     bot = new TelegramBot(config.bot_token, { polling: true });
     
     const ADMIN_IDS = config.admin_id ? config.admin_id.split(',').map(id => id.trim()) : [];
-    const WELCOME_MSG = config.welcome_msg || "👋 Welcome to VPN Shop!\nမင်္ဂလာပါ VPN Shop မှ ကြိုဆိုပါတယ်။";
+    const WELCOME_MSG = config.welcome_msg || "👋 Welcome to VPN Shop!";
     const TRIAL_ENABLED = config.trial_enabled !== false;
     const TRIAL_DAYS = parseInt(config.trial_days) || 1;
     const TRIAL_GB = parseFloat(config.trial_gb) || 1;
     
     const BTN = {
-        trial: (config.buttons && config.buttons.trial) ? config.buttons.trial : "🆓 Free Trial (အစမ်းသုံးရန်)",
-        buy: (config.buttons && config.buttons.buy) ? config.buttons.buy : "🛒 Buy Key (ဝယ်ယူရန်)",
-        mykey: (config.buttons && config.buttons.mykey) ? config.buttons.mykey : "🔑 My Key (မိမိ Key ရယူရန်)",
-        info: (config.buttons && config.buttons.info) ? config.buttons.info : "👤 Account Info (အကောင့်စစ်ရန်)",
-        support: (config.buttons && config.buttons.support) ? config.buttons.support : "🆘 Support (ဆက်သွယ်ရန်)",
+        trial: (config.buttons && config.buttons.trial) ? config.buttons.trial : "🆓 Free Trial",
+        buy: (config.buttons && config.buttons.buy) ? config.buttons.buy : "🛒 Buy Key",
+        mykey: (config.buttons && config.buttons.mykey) ? config.buttons.mykey : "🔑 My Key",
+        info: (config.buttons && config.buttons.info) ? config.buttons.info : "👤 Account Info",
+        support: (config.buttons && config.buttons.support) ? config.buttons.support : "🆘 Support",
         reseller: (config.buttons && config.buttons.reseller) ? config.buttons.reseller : "🤝 Reseller Login",
         resell_buy: (config.buttons && config.buttons.resell_buy) ? config.buttons.resell_buy : "🛒 Buy Stock",
         resell_create: (config.buttons && config.buttons.resell_create) ? config.buttons.resell_create : "📦 Create User Key",
@@ -309,7 +323,6 @@ function startBot() {
         if (userStates[chatId]) {
             const state = userStates[chatId];
             
-            // --- ADMIN BROADCAST ---
             if (state.status === 'ADMIN_BROADCAST_MSG') {
                 if(!isAdmin(chatId)) return;
                 const msgText = text;
@@ -509,13 +522,13 @@ function startBot() {
             return;
         }
 
+        // --- INFO BUTTON (WITH OFFSET LOGIC) ---
         if (text === BTN.info) {
             const userFullName = `${msg.from.first_name}`.trim(); 
             bot.sendMessage(chatId, "🔎 Checking Status..."); 
             try { 
                 const result = await findKeyInAllServers(userFullName, true);
                 if (!result) return bot.sendMessage(chatId, "❌ **Account Not Found**"); 
-                
                 const { key, metrics, serverName } = result;
                 const rawUsage = metrics.bytesTransferredByUserId[key.id] || 0; 
                 const rawLimit = key.dataLimit ? key.dataLimit.bytes : 0; 
@@ -890,9 +903,9 @@ function startBot() {
                     // *** RESET & TOP UP LOGIC ***
                     const currentRaw = metrics.bytesTransferredByUserId[keyId] || 0;
                     
-                    // 1. SAVE OFFSET (Snap current usage as 0 point)
+                    // 1. *** FORCE SYNC: SAVE OFFSET TO FILE ***
                     usageOffsets[keyId] = currentRaw;
-                    saveOffsets();
+                    saveOffsets(); 
 
                     // 2. SET NEW LIMIT (Raw Usage + New Plan Amount)
                     const planBytes = Math.floor(p.gb * 1024 * 1024 * 1024);
@@ -1051,7 +1064,7 @@ function startBot() {
                 // *** RESET & TOP UP LOGIC FOR RESELLER ***
                 const currentRaw = mRes.data.bytesTransferredByUserId[keyId] || 0;
                 
-                // 1. SAVE OFFSET
+                // 1. *** FORCE SYNC: SAVE OFFSET TO FILE ***
                 usageOffsets[keyId] = currentRaw;
                 saveOffsets();
 
@@ -1188,17 +1201,28 @@ cat << 'PKG' > package.json
 PKG
 npm install
 
-# 8. Setup Nginx
-echo -e "${YELLOW}Configuring Nginx...${NC}"
+# 8. Setup Nginx (Backend Proxy only - No Webpanel files)
+echo -e "${YELLOW}Configuring Nginx (Backend Proxy)...${NC}"
 cat << 'NGINX' > /etc/nginx/sites-available/default
 server {
     listen 80;
     server_name _;
-    root /var/www/html;
-    index index.html;
+    
+    # We remove the root /var/www/html since you don't want Webpanel
+    # Instead, we just proxy API requests or show a simple status
+    
+    location /api/ {
+        proxy_pass http://localhost:3000/api/;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection 'upgrade';
+        proxy_set_header Host $host;
+        proxy_cache_bypass $http_upgrade;
+    }
 
     location / {
-        try_files $uri $uri/ =404;
+        return 200 'VPN Bot is Running!';
+        add_header Content-Type text/plain;
     }
 }
 NGINX
@@ -1219,8 +1243,8 @@ pm2 startup
 pm2 save
 
 echo -e "${GREEN}==========================================${NC}"
-echo -e "${GREEN} INSTALLATION COMPLETE! ${NC}"
+echo -e "${GREEN} INSTALLATION COMPLETE! (Bot + Sync Logic) ${NC}"
 echo -e "${GREEN}==========================================${NC}"
 echo -e "Backend Port: ${YELLOW}3000${NC}"
 echo -e "Service Name: ${YELLOW}vpn-shop${NC}"
-echo -e "\nPlease visit your Panel URL and configure your Bot Token/Admin ID."
+echo -e "Status: Bot is running with Offset Sync Logic enabled."
