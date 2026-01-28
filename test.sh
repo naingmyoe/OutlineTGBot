@@ -1,10 +1,9 @@
 #!/bin/bash
 
-# 3xbot Ultimate Installer (v9.8 - API Payload Fix)
+# 3xbot Ultimate Installer (v9.9 - Notification Fix & Admin Menu Update)
 # Updates:
-# 1. FIXED: Stringify 'streamSettings' & 'sniffing' before updating (Crucial for Switch Off).
-# 2. FIXED: Removes read-only fields (clientStats) from update payload.
-# 3. LOGS: Enhanced success/error logs for monitoring.
+# 1. FIXED: Notification logic to send alerts even if user is already disabled by panel.
+# 2. REMOVED: 'Server List' button from Admin Panel.
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -13,7 +12,7 @@ CYAN='\033[0;36m'
 NC='\033[0m'
 
 echo -e "${CYAN}=====================================================${NC}"
-echo -e "${CYAN}    3xbot Installer v9.8 (Switch Off Fix)            ${NC}"
+echo -e "${CYAN}    3xbot Installer v9.9 (Notification Fix)          ${NC}"
 echo -e "${CYAN}=====================================================${NC}"
 
 # Check Root
@@ -37,7 +36,7 @@ cd "$PROJECT_DIR"
 cat > package.json <<EOF
 {
   "name": "3xbot-manager",
-  "version": "9.8.0",
+  "version": "9.9.0",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
@@ -55,7 +54,7 @@ cat > package.json <<EOF
 }
 EOF
 
-# 2. Config Template
+# 2. Config Template (Only if not exists)
 if [ ! -f config.json ]; then
     cat << 'EOF' > config.json
 {
@@ -92,7 +91,7 @@ if [ ! -f config.json ]; then
 EOF
 fi
 
-# 3. Create index.js (UPDATED: Payload Fix)
+# 3. Create index.js (UPDATED: Notification Fix & Remove Server List)
 cat > index.js <<'EOF'
 const express = require('express');
 const bodyParser = require('body-parser');
@@ -243,7 +242,7 @@ function startBot(token) {
     bot = new TelegramBot(token, { polling: true });
     console.log("✅ Telegram Bot Started...");
 
-    startMonitoringLoop(); // Start Auto Check Loop
+    startMonitoringLoop(); 
 
     const isAdmin = (chatId) => {
         const cfg = loadConfig();
@@ -258,8 +257,13 @@ function startBot(token) {
         bot.sendMessage(chatId, "👋 **Main Menu**", { parse_mode: 'Markdown', reply_markup: { keyboard, resize_keyboard: true } });
     };
 
+    // --- MODIFIED: REMOVED SERVER LIST ---
     const sendAdminMenu = (chatId) => {
-        const kb = [[{ text: "📢 Broadcast Message" }, { text: "👥 Reseller User" }], [{ text: "💰 Reseller TopUp" }, { text: "🖥 Server List" }], [{ text: "🔙 Back to Main Menu" }]];
+        const kb = [
+            [{ text: "📢 Broadcast Message" }, { text: "👥 Reseller User" }], 
+            [{ text: "💰 Reseller TopUp" }], 
+            [{ text: "🔙 Back to Main Menu" }]
+        ];
         bot.sendMessage(chatId, "👮 **Admin Panel**", { parse_mode: 'Markdown', reply_markup: { keyboard: kb, resize_keyboard: true } });
     };
 
@@ -351,10 +355,7 @@ function startBot(token) {
                 const resIdx = adminSession[chatId].resIdx; currentCfg.resellers[resIdx].balance += amount; saveConfig(currentCfg); delete adminSession[chatId];
                 return bot.sendMessage(chatId, `✅ Added **${amount}**.`);
             }
-            if (text === "🖥 Server List") {
-                const btns = currentCfg.servers.map((s, i) => [{ text: `🖥 ${s.name}`, callback_data: `admsrv_${i}` }]);
-                return bot.sendMessage(chatId, "🖥 **Select a Server:**", { parse_mode: 'Markdown', reply_markup: { inline_keyboard: btns } });
-            }
+            // Removed "Server List" handler as requested
         }
         if (resellerSessions[chatId]?.state === 'WAIT_USER') { resellerSessions[chatId].username = text; resellerSessions[chatId].state = 'WAIT_PASS'; return bot.sendMessage(chatId, "🔑 Password:"); }
         if (resellerSessions[chatId]?.state === 'WAIT_PASS') {
@@ -562,11 +563,16 @@ async function monitorExpirations() {
                             const isExpired = c.expiryTime > 0 && c.expiryTime <= Date.now();
                             const isDataFull = c.totalGB > 0 && totalUsed >= c.totalGB;
 
-                            if ((isExpired || isDataFull) && c.enable === true) {
-                                console.log(`[ACTION] Disabling ${c.email}`);
-                                settings.clients[i].enable = false; 
-                                modified = true;
+                            // --- MODIFIED NOTIFICATION LOGIC ---
+                            if (isExpired || isDataFull) {
+                                // 1. Disable in Panel if currently enabled
+                                if (c.enable === true) {
+                                    console.log(`[ACTION] Disabling ${c.email}`);
+                                    settings.clients[i].enable = false; 
+                                    modified = true;
+                                }
 
+                                // 2. Send Notification (Check even if already disabled)
                                 const session = cfg.activeSessions.find(s => s.email === c.email);
                                 if (session && !session.notified) {
                                     const reason = isExpired ? "📅 Plan Expired" : "📉 Data Limit Reached";
@@ -574,24 +580,19 @@ async function monitorExpirations() {
                                         await bot.sendMessage(session.chatId, `⚠️ **Service Paused**\n\nUser: ${session.email}\nReason: ${reason}`, { parse_mode: 'Markdown' });
                                         session.notified = true; 
                                         updated = true;
-                                    } catch (e) {}
+                                        console.log(`[NOTIFY] Alert sent to ${session.email}`);
+                                    } catch (e) {
+                                        console.log(`[NOTIFY FAILED] Could not send to ${session.email}`);
+                                    }
                                 }
                             }
                         }
                     }
 
                     if (modified) {
-                        // ** CRITICAL FIX: CLEAN PAYLOAD **
-                        // We must format streamSettings/sniffing properly (usually strings in some API versions)
-                        // But standard fix is to ensure we send what GET gave us, but ensure objects are stringified if needed.
-                        // Actually, MHSanaei/X-UI update expects raw object spreads usually work unless read-only fields exist.
-                        // We will strip read-only fields to be safe.
-                        
                         let streamSettings = inb.streamSettings;
                         let sniffing = inb.sniffing;
 
-                        // Ensure they are JSON strings if they came as objects (Check Panel Version Behavior)
-                        // Most safe way: If they are objects, JSON.stringify them.
                         if (typeof streamSettings === 'object') streamSettings = JSON.stringify(streamSettings);
                         if (typeof sniffing === 'object') sniffing = JSON.stringify(sniffing);
 
@@ -605,7 +606,7 @@ async function monitorExpirations() {
                             listen: inb.listen,
                             port: inb.port,
                             protocol: inb.protocol,
-                            settings: JSON.stringify(settings), // This contains the disabled client
+                            settings: JSON.stringify(settings), 
                             streamSettings: streamSettings,
                             sniffing: sniffing,
                             tag: inb.tag
@@ -952,5 +953,5 @@ pm2 save
 pm2 startup
 
 IP=$(curl -s ifconfig.me)
-echo -e "${GREEN}✅ UPDATE COMPLETE! (Payload Fix Applied)${NC}"
+echo -e "${GREEN}✅ UPDATE COMPLETE! (Notifications Fixed + Server List Removed)${NC}"
 echo -e "${GREEN}Panel: http://$IP:3000${NC}"
