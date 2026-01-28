@@ -1,9 +1,10 @@
 #!/bin/bash
 
-# 3xbot Ultimate Installer (v9.9.2 - Status Icons Update)
+# 3xbot Ultimate Installer (v9.9.3 - Server Name in Lists)
 # Updates:
-# 1. UI: Added 🔴 (Red) for OFF and 🟢 (Green) for ON in User Lists (Admin & Reseller).
-# 2. SYNC: Auto-syncs status when opening lists to ensure icons are accurate.
+# 1. Admin Reseller View: Now shows [ServerName] next to user.
+# 2. Reseller Extend View: Ensures [ServerName] is visible for all users.
+# 3. SYNC: Auto-syncs status and handles multi-server user lists.
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -12,7 +13,7 @@ CYAN='\033[0;36m'
 NC='\033[0m'
 
 echo -e "${CYAN}=====================================================${NC}"
-echo -e "${CYAN}    3xbot Installer v9.9.2 (Status Icons)            ${NC}"
+echo -e "${CYAN}    3xbot Installer v9.9.3 (Server Name Display)     ${NC}"
 echo -e "${CYAN}=====================================================${NC}"
 
 # Check Root
@@ -36,7 +37,7 @@ cd "$PROJECT_DIR"
 cat > package.json <<EOF
 {
   "name": "3xbot-manager",
-  "version": "9.9.2",
+  "version": "9.9.3",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
@@ -91,7 +92,7 @@ if [ ! -f config.json ]; then
 EOF
 fi
 
-# 3. Create index.js (UPDATED: Status Icons)
+# 3. Create index.js (UPDATED: Server Names in Lists)
 cat > index.js <<'EOF'
 const express = require('express');
 const bodyParser = require('body-parser');
@@ -162,7 +163,7 @@ function getClientTraffic(client, clientStats) {
     return Number(client.up || 0) + Number(client.down || 0);
 }
 
-// --- SYNC USERS (UPDATED TO CAPTURE STATUS) ---
+// --- SYNC USERS (Status Update) ---
 async function syncResellerUsers(resIdx) {
     let cfg = loadConfig();
     const reseller = cfg.resellers[resIdx];
@@ -185,7 +186,7 @@ async function syncResellerUsers(resIdx) {
             if (!cookies) { validUsers.push(...localUsers); continue; }
             const res = await axiosInstance.get(`${server.url}/panel/api/inbounds/list`, { headers: { 'Cookie': cookies } });
             if (res.data && res.data.success) {
-                const remoteStatus = {}; // Map: email -> enabled (true/false)
+                const remoteStatus = {}; 
                 res.data.obj.forEach(inb => {
                     const settings = JSON.parse(inb.settings);
                     if (settings.clients) settings.clients.forEach(c => remoteStatus[c.email] = c.enable);
@@ -193,7 +194,6 @@ async function syncResellerUsers(resIdx) {
                 
                 localUsers.forEach(u => {
                     if (remoteStatus.hasOwnProperty(u.email)) {
-                        // Update status from server
                         if (u.enabled !== remoteStatus[u.email]) {
                             u.enabled = remoteStatus[u.email];
                             hasChanges = true;
@@ -208,16 +208,7 @@ async function syncResellerUsers(resIdx) {
         } catch (e) { validUsers.push(...localUsers); }
     }
     
-    // Sort logic removed to keep order, but we update the main list
-    // We need to reconstruct the main list to preserve users from failed servers too.
-    // Simpler: Just replace reseller.createdUsers with validUsers but validUsers only contains processed ones.
-    // For safety, we only update if we successfully fetched. 
-    // Current logic re-pushes valid ones.
-    
     if (hasChanges) {
-        // Re-map validUsers to the reseller object (flattening)
-        // Note: The loop processed users by server, so validUsers has all processed ones. 
-        // We should just use validUsers as the new list.
         cfg.resellers[resIdx].createdUsers = validUsers;
         saveConfig(cfg);
     }
@@ -682,10 +673,12 @@ async function handleResellerList(chatId, resIdx, page, msgIdToEdit = null) {
     const totalPages = Math.ceil(totalUsers / pageSize); 
     const start = page * pageSize; 
     const currentUsers = reseller.createdUsers.slice(start, start + pageSize);
-    // UPDATED: Added Icon Logic
+    
+    // UPDATED: Now shows [ServerName]
     const btns = currentUsers.map((u, i) => {
         const icon = u.enabled === false ? "🔴" : "🟢";
-        return [{ text: `${icon} [${config.servers[u.serverIdx]?.name||'?'}] ${u.name}`, callback_data: `rview_${resIdx}_${start + i}` }];
+        const serverName = config.servers[u.serverIdx]?.name || "Unknown";
+        return [{ text: `${icon} [${serverName}] ${u.name}`, callback_data: `rview_${resIdx}_${start + i}` }];
     });
     const navRow = [];
     if (page > 0) navRow.push({ text: "⬅️", callback_data: `rpage_${resIdx}_${page - 1}` });
@@ -902,10 +895,12 @@ async function handleAdminResellerUserList(chatId, resIdx, page, msgIdToEdit = n
     const reseller = config.resellers[resIdx];
     if (!reseller || !reseller.createdUsers || reseller.createdUsers.length === 0) return bot.sendMessage(chatId, `⚠️ **${reseller.username}** has no users.`);
     const pageSize = 10; const totalUsers = reseller.createdUsers.length; const totalPages = Math.ceil(totalUsers / pageSize); const start = page * pageSize; const currentUsers = reseller.createdUsers.slice(start, start + pageSize);
-    // UPDATED: Icon Logic for Admin
+    
+    // UPDATED: Shows [ServerName] in Admin View
     const btns = currentUsers.map((u, i) => {
         const icon = u.enabled === false ? "🔴" : "🟢";
-        return [{ text: `${icon} ${u.name}`, callback_data: `admshowu_${resIdx}_${start+i}` }];
+        const serverName = config.servers[u.serverIdx]?.name || "Unknown";
+        return [{ text: `${icon} [${serverName}] ${u.name}`, callback_data: `admshowu_${resIdx}_${start+i}` }];
     });
     const navRow = [];
     if (page > 0) navRow.push({ text: "⬅️", callback_data: `admu_page_${resIdx}_${page - 1}` });
@@ -915,6 +910,7 @@ async function handleAdminResellerUserList(chatId, resIdx, page, msgIdToEdit = n
     if (msgIdToEdit) bot.editMessageText(text, { chat_id: chatId, message_id: msgIdToEdit, parse_mode: 'Markdown', reply_markup: { inline_keyboard: btns } });
     else bot.sendMessage(chatId, text, { parse_mode: 'Markdown', reply_markup: { inline_keyboard: btns } });
 }
+
 async function fetchAndShowServerUsers(chatId, srvIdx, page = 0, msgIdToEdit = null) {
     const config = loadConfig();
     const server = config.servers[srvIdx];
@@ -940,6 +936,7 @@ async function fetchAndShowServerUsers(chatId, srvIdx, page = 0, msgIdToEdit = n
         } else bot.sendMessage(chatId, "❌ Failed to fetch list.");
     } catch(e) { bot.sendMessage(chatId, "❌ Connection Error."); }
 }
+
 async function renderServerUserPage(chatId, page, msgIdToEdit = null) {
     const session = adminSession[chatId];
     if(!session || session.type !== 'SERVER_VIEW') return;
@@ -963,25 +960,7 @@ async function renderServerUserPage(chatId, page, msgIdToEdit = null) {
     if(msgIdToEdit) bot.editMessageText(msg, { chat_id: chatId, message_id: msgIdToEdit, parse_mode: 'Markdown', reply_markup: { inline_keyboard: btns } });
     else bot.sendMessage(chatId, msg, { parse_mode: 'Markdown', reply_markup: { inline_keyboard: btns } });
 }
-async function findUserInPanelGlobal(srv, email) {
-    try {
-        const cookies = await login(srv);
-        if(!cookies) return null;
-        const res = await axiosInstance.get(`${srv.url}/panel/api/inbounds/list`, { headers: { 'Cookie': cookies } });
-        if(!res.data || !res.data.success) return null;
-        const allInbounds = res.data.obj;
-        for (const inb of allInbounds) {
-            const settings = JSON.parse(inb.settings);
-            if (settings.clients) {
-                const client = settings.clients.find(c => c.email === email);
-                if (client) {
-                    return { found: true, inbound: inb, client: client, settings: settings, cookies: cookies, clientStats: inb.clientStats || [] };
-                }
-            }
-        }
-        return { found: false };
-    } catch(e) { return null; }
-}
+
 EOF
 
 # 4. Install & Run
@@ -996,5 +975,5 @@ pm2 save
 pm2 startup
 
 IP=$(curl -s ifconfig.me)
-echo -e "${GREEN}✅ UPDATE COMPLETE! (User Status Icons Added)${NC}"
+echo -e "${GREEN}✅ UPDATE COMPLETE! (Server Names Added)${NC}"
 echo -e "${GREEN}Panel: http://$IP:3000${NC}"
