@@ -1,9 +1,9 @@
 #!/bin/bash
 
-# 3xbot Ultimate Installer (v9.9 - Notification Fix & Admin Menu Update)
+# 3xbot Ultimate Installer (v9.9.2 - Status Icons Update)
 # Updates:
-# 1. FIXED: Notification logic to send alerts even if user is already disabled by panel.
-# 2. REMOVED: 'Server List' button from Admin Panel.
+# 1. UI: Added 🔴 (Red) for OFF and 🟢 (Green) for ON in User Lists (Admin & Reseller).
+# 2. SYNC: Auto-syncs status when opening lists to ensure icons are accurate.
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -12,7 +12,7 @@ CYAN='\033[0;36m'
 NC='\033[0m'
 
 echo -e "${CYAN}=====================================================${NC}"
-echo -e "${CYAN}    3xbot Installer v9.9 (Notification Fix)          ${NC}"
+echo -e "${CYAN}    3xbot Installer v9.9.2 (Status Icons)            ${NC}"
 echo -e "${CYAN}=====================================================${NC}"
 
 # Check Root
@@ -36,7 +36,7 @@ cd "$PROJECT_DIR"
 cat > package.json <<EOF
 {
   "name": "3xbot-manager",
-  "version": "9.9.0",
+  "version": "9.9.2",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
@@ -91,7 +91,7 @@ if [ ! -f config.json ]; then
 EOF
 fi
 
-# 3. Create index.js (UPDATED: Notification Fix & Remove Server List)
+# 3. Create index.js (UPDATED: Status Icons)
 cat > index.js <<'EOF'
 const express = require('express');
 const bodyParser = require('body-parser');
@@ -162,7 +162,7 @@ function getClientTraffic(client, clientStats) {
     return Number(client.up || 0) + Number(client.down || 0);
 }
 
-// --- SYNC USERS ---
+// --- SYNC USERS (UPDATED TO CAPTURE STATUS) ---
 async function syncResellerUsers(resIdx) {
     let cfg = loadConfig();
     const reseller = cfg.resellers[resIdx];
@@ -185,19 +185,39 @@ async function syncResellerUsers(resIdx) {
             if (!cookies) { validUsers.push(...localUsers); continue; }
             const res = await axiosInstance.get(`${server.url}/panel/api/inbounds/list`, { headers: { 'Cookie': cookies } });
             if (res.data && res.data.success) {
-                const allEmails = new Set();
+                const remoteStatus = {}; // Map: email -> enabled (true/false)
                 res.data.obj.forEach(inb => {
                     const settings = JSON.parse(inb.settings);
-                    if (settings.clients) settings.clients.forEach(c => allEmails.add(c.email));
+                    if (settings.clients) settings.clients.forEach(c => remoteStatus[c.email] = c.enable);
                 });
+                
                 localUsers.forEach(u => {
-                    if (allEmails.has(u.email)) validUsers.push(u);
-                    else { console.log(`[SYNC] Removing ghost user: ${u.email}`); hasChanges = true; }
+                    if (remoteStatus.hasOwnProperty(u.email)) {
+                        // Update status from server
+                        if (u.enabled !== remoteStatus[u.email]) {
+                            u.enabled = remoteStatus[u.email];
+                            hasChanges = true;
+                        }
+                        validUsers.push(u);
+                    } else { 
+                        console.log(`[SYNC] Removing ghost user: ${u.email}`); 
+                        hasChanges = true; 
+                    }
                 });
             } else validUsers.push(...localUsers);
         } catch (e) { validUsers.push(...localUsers); }
     }
+    
+    // Sort logic removed to keep order, but we update the main list
+    // We need to reconstruct the main list to preserve users from failed servers too.
+    // Simpler: Just replace reseller.createdUsers with validUsers but validUsers only contains processed ones.
+    // For safety, we only update if we successfully fetched. 
+    // Current logic re-pushes valid ones.
+    
     if (hasChanges) {
+        // Re-map validUsers to the reseller object (flattening)
+        // Note: The loop processed users by server, so validUsers has all processed ones. 
+        // We should just use validUsers as the new list.
         cfg.resellers[resIdx].createdUsers = validUsers;
         saveConfig(cfg);
     }
@@ -257,7 +277,6 @@ function startBot(token) {
         bot.sendMessage(chatId, "👋 **Main Menu**", { parse_mode: 'Markdown', reply_markup: { keyboard, resize_keyboard: true } });
     };
 
-    // --- MODIFIED: REMOVED SERVER LIST ---
     const sendAdminMenu = (chatId) => {
         const kb = [
             [{ text: "📢 Broadcast Message" }, { text: "👥 Reseller User" }], 
@@ -355,7 +374,6 @@ function startBot(token) {
                 const resIdx = adminSession[chatId].resIdx; currentCfg.resellers[resIdx].balance += amount; saveConfig(currentCfg); delete adminSession[chatId];
                 return bot.sendMessage(chatId, `✅ Added **${amount}**.`);
             }
-            // Removed "Server List" handler as requested
         }
         if (resellerSessions[chatId]?.state === 'WAIT_USER') { resellerSessions[chatId].username = text; resellerSessions[chatId].state = 'WAIT_PASS'; return bot.sendMessage(chatId, "🔑 Password:"); }
         if (resellerSessions[chatId]?.state === 'WAIT_PASS') {
@@ -563,16 +581,26 @@ async function monitorExpirations() {
                             const isExpired = c.expiryTime > 0 && c.expiryTime <= Date.now();
                             const isDataFull = c.totalGB > 0 && totalUsed >= c.totalGB;
 
-                            // --- MODIFIED NOTIFICATION LOGIC ---
                             if (isExpired || isDataFull) {
-                                // 1. Disable in Panel if currently enabled
+                                // 1. Disable in Panel
                                 if (c.enable === true) {
                                     console.log(`[ACTION] Disabling ${c.email}`);
                                     settings.clients[i].enable = false; 
                                     modified = true;
+
+                                    // **SYNC LOCAL STATUS**: Update Reseller List status instantly
+                                    if(cfg.resellers) {
+                                        cfg.resellers.forEach(r => {
+                                            if(r.createdUsers) {
+                                                r.createdUsers.forEach(u => {
+                                                    if(u.email === c.email) { u.enabled = false; updated = true; }
+                                                });
+                                            }
+                                        });
+                                    }
                                 }
 
-                                // 2. Send Notification (Check even if already disabled)
+                                // 2. Send Notification
                                 const session = cfg.activeSessions.find(s => s.email === c.email);
                                 if (session && !session.notified) {
                                     const reason = isExpired ? "📅 Plan Expired" : "📉 Data Limit Reached";
@@ -582,7 +610,9 @@ async function monitorExpirations() {
                                         updated = true;
                                         console.log(`[NOTIFY] Alert sent to ${session.email}`);
                                     } catch (e) {
-                                        console.log(`[NOTIFY FAILED] Could not send to ${session.email}`);
+                                        console.log(`[NOTIFY FAILED] Could not send to ${session.email}: ${e.message}`);
+                                        session.notified = true; 
+                                        updated = true;
                                     }
                                 }
                             }
@@ -652,7 +682,11 @@ async function handleResellerList(chatId, resIdx, page, msgIdToEdit = null) {
     const totalPages = Math.ceil(totalUsers / pageSize); 
     const start = page * pageSize; 
     const currentUsers = reseller.createdUsers.slice(start, start + pageSize);
-    const btns = currentUsers.map((u, i) => [{ text: `[${config.servers[u.serverIdx]?.name||'?'}] ${u.name}`, callback_data: `rview_${resIdx}_${start + i}` }]);
+    // UPDATED: Added Icon Logic
+    const btns = currentUsers.map((u, i) => {
+        const icon = u.enabled === false ? "🔴" : "🟢";
+        return [{ text: `${icon} [${config.servers[u.serverIdx]?.name||'?'}] ${u.name}`, callback_data: `rview_${resIdx}_${start + i}` }];
+    });
     const navRow = [];
     if (page > 0) navRow.push({ text: "⬅️", callback_data: `rpage_${resIdx}_${page - 1}` });
     if (page < totalPages - 1) navRow.push({ text: "➡️", callback_data: `rpage_${resIdx}_${page + 1}` });
@@ -765,6 +799,9 @@ async function renewResellerUser(chatId, resIdxStr, userIdxStr, price, days, lim
             await axiosInstance.post(`${srv.url}/panel/api/inbounds/update/${inbound.id}`, payload, { headers: { 'Cookie': result.cookies } });
 
             cfg.resellers[resIdx].balance -= price;
+            // Update Local Status
+            cfg.resellers[resIdx].createdUsers[userIdx].enabled = true;
+
             const session = cfg.activeSessions.find(s => s.email === userRec.email);
             if(session) session.notified = false;
             saveConfig(cfg);
@@ -822,7 +859,7 @@ async function generateResellerKey(chatId, srv, plan, protocol, resIdx, customNa
         await axiosInstance.post(`${srv.url}/panel/api/inbounds/addClient`, { id: parseInt(inboundId), settings: JSON.stringify({ clients: [{ id: uuid, password: uuid, email: email, totalGB: plan.limitGB*1024*1024*1024, expiryTime: Date.now() + (plan.days*86400000), enable: true, flow: "" }] }) }, { headers: { 'Cookie': cookies } });
         const cfg = loadConfig();
         if(!cfg.resellers[resIdx].createdUsers) cfg.resellers[resIdx].createdUsers = [];
-        cfg.resellers[resIdx].createdUsers.push({ name: customName, email: email, inboundId: inboundId, serverIdx: cfg.servers.findIndex(s=>s.url === srv.url), planPrice: plan.price, planDays: plan.days });
+        cfg.resellers[resIdx].createdUsers.push({ name: customName, email: email, inboundId: inboundId, serverIdx: cfg.servers.findIndex(s=>s.url === srv.url), planPrice: plan.price, planDays: plan.days, enabled: true });
         if(!cfg.activeSessions) cfg.activeSessions = [];
         cfg.activeSessions.push({ email: email, chatId: chatId, serverIdx: cfg.servers.findIndex(s=>s.url === srv.url), notified: false });
         saveConfig(cfg);
@@ -858,12 +895,18 @@ function handleAdminResellerList(chatId) {
     const btns = config.resellers.map((r, i) => [{ text: `👤 ${r.username} (💰 ${r.balance})`, callback_data: `admviewres_${i}` }]);
     bot.sendMessage(chatId, "Select Reseller:", { reply_markup: { inline_keyboard: btns } });
 }
-function handleAdminResellerUserList(chatId, resIdx, page, msgIdToEdit = null) {
+async function handleAdminResellerUserList(chatId, resIdx, page, msgIdToEdit = null) {
+    // UPDATED: Sync first for admin view
+    await syncResellerUsers(resIdx);
     const config = loadConfig();
     const reseller = config.resellers[resIdx];
     if (!reseller || !reseller.createdUsers || reseller.createdUsers.length === 0) return bot.sendMessage(chatId, `⚠️ **${reseller.username}** has no users.`);
     const pageSize = 10; const totalUsers = reseller.createdUsers.length; const totalPages = Math.ceil(totalUsers / pageSize); const start = page * pageSize; const currentUsers = reseller.createdUsers.slice(start, start + pageSize);
-    const btns = currentUsers.map((u, i) => [{ text: `👤 ${u.name}`, callback_data: `admshowu_${resIdx}_${start+i}` }]);
+    // UPDATED: Icon Logic for Admin
+    const btns = currentUsers.map((u, i) => {
+        const icon = u.enabled === false ? "🔴" : "🟢";
+        return [{ text: `${icon} ${u.name}`, callback_data: `admshowu_${resIdx}_${start+i}` }];
+    });
     const navRow = [];
     if (page > 0) navRow.push({ text: "⬅️", callback_data: `admu_page_${resIdx}_${page - 1}` });
     if (page < totalPages - 1) navRow.push({ text: "➡️", callback_data: `admu_page_${resIdx}_${page + 1}` });
@@ -953,5 +996,5 @@ pm2 save
 pm2 startup
 
 IP=$(curl -s ifconfig.me)
-echo -e "${GREEN}✅ UPDATE COMPLETE! (Notifications Fixed + Server List Removed)${NC}"
+echo -e "${GREEN}✅ UPDATE COMPLETE! (User Status Icons Added)${NC}"
 echo -e "${GREEN}Panel: http://$IP:3000${NC}"
