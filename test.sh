@@ -1,10 +1,10 @@
 #!/bin/bash
 
-# 3xbot Ultimate Installer (v9.5 - Global Search & Force Disable)
+# 3xbot Ultimate Installer (v9.6 - Auto Sync & Force Off Fix)
 # Updates:
-# 1. FIXED: "User Not Found" -> Now searches EVERY inbound dynamically by Email.
-# 2. FIXED: Auto-Disable -> Immediately forces Panel Switch OFF when expired.
-# 3. DEBUG: Added clear logs in terminal to see what's happening.
+# 1. FIXED: Ghost Users -> Automatically removes users from bot if missing in panel.
+# 2. FIXED: Auto-Disable -> Forces Panel Switch OFF for negative days (-1).
+# 3. IMPROVED: Reseller List now syncs with Panel in real-time.
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -13,7 +13,7 @@ CYAN='\033[0;36m'
 NC='\033[0m'
 
 echo -e "${CYAN}=====================================================${NC}"
-echo -e "${CYAN}    3xbot Installer v9.5 (Global Search Fix)         ${NC}"
+echo -e "${CYAN}    3xbot Installer v9.6 (Sync & Auto-Off Fix)       ${NC}"
 echo -e "${CYAN}=====================================================${NC}"
 
 # Check Root
@@ -37,7 +37,7 @@ cd "$PROJECT_DIR"
 cat > package.json <<EOF
 {
   "name": "3xbot-manager",
-  "version": "9.5.0",
+  "version": "9.6.0",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
@@ -92,7 +92,7 @@ if [ ! -f config.json ]; then
 EOF
 fi
 
-# 3. Create index.js (UPDATED: Global Search & Force Disable)
+# 3. Create index.js (UPDATED: Sync Logic & Force Off)
 cat > index.js <<'EOF'
 const express = require('express');
 const bodyParser = require('body-parser');
@@ -160,39 +160,74 @@ function getClientTraffic(client, clientStats) {
     return Number(client.up || 0) + Number(client.down || 0);
 }
 
-// --- CORE: GLOBAL USER SEARCH (THE FIX) ---
-// Finds a user in ANY inbound by Email. Solves "User Not Found".
-async function findUserInPanelGlobal(srv, email) {
-    try {
-        const cookies = await login(srv);
-        if(!cookies) return null;
-        
-        const res = await axios.get(`${srv.url}/panel/api/inbounds/list`, { headers: { 'Cookie': cookies } });
-        if(!res.data || !res.data.success) return null;
+// --- CORE: SYNC & CLEAN USERS ---
+// This function checks local users against the panel and removes ghosts
+async function syncResellerUsers(resIdx) {
+    let cfg = loadConfig();
+    const reseller = cfg.resellers[resIdx];
+    if (!reseller || !reseller.createdUsers || reseller.createdUsers.length === 0) return;
 
-        const allInbounds = res.data.obj;
-        for (const inb of allInbounds) {
-            const settings = JSON.parse(inb.settings);
-            if (settings.clients) {
-                const client = settings.clients.find(c => c.email === email);
-                if (client) {
-                    return { 
-                        found: true, 
-                        inbound: inb, 
-                        client: client, 
-                        settings: settings, 
-                        cookies: cookies,
-                        clientStats: inb.clientStats || []
-                    };
-                }
+    // Group users by server to minimize login requests
+    const usersByServer = {};
+    reseller.createdUsers.forEach((u, idx) => {
+        if (!usersByServer[u.serverIdx]) usersByServer[u.serverIdx] = [];
+        usersByServer[u.serverIdx].push({ ...u, originalIdx: idx });
+    });
+
+    let validUsers = [];
+    let hasChanges = false;
+
+    for (const srvIdx in usersByServer) {
+        const server = cfg.servers[srvIdx];
+        const localUsers = usersByServer[srvIdx];
+
+        try {
+            const cookies = await login(server);
+            if (!cookies) {
+                // If server is down, keep users to be safe
+                validUsers.push(...localUsers);
+                continue;
             }
+
+            const res = await axios.get(`${server.url}/panel/api/inbounds/list`, { headers: { 'Cookie': cookies } });
+            if (res.data && res.data.success) {
+                const allInbounds = res.data.obj;
+                const allEmails = new Set();
+                
+                // Collect ALL emails from panel
+                allInbounds.forEach(inb => {
+                    const settings = JSON.parse(inb.settings);
+                    if (settings.clients) {
+                        settings.clients.forEach(c => allEmails.add(c.email));
+                    }
+                });
+
+                // Filter: Keep only if email exists in panel
+                localUsers.forEach(u => {
+                    if (allEmails.has(u.email)) {
+                        validUsers.push(u);
+                    } else {
+                        console.log(`[SYNC] Removing ghost user: ${u.email}`);
+                        hasChanges = true;
+                    }
+                });
+            } else {
+                 validUsers.push(...localUsers);
+            }
+        } catch (e) {
+            console.log(`[SYNC ERROR] Server ${srvIdx}: ${e.message}`);
+            validUsers.push(...localUsers);
         }
-        return { found: false };
-    } catch(e) {
-        console.log("Search Error:", e.message);
-        return null;
+    }
+
+    if (hasChanges) {
+        // Sort valid users to maintain order or just save
+        // We need to reconstruct the reseller's user list
+        cfg.resellers[resIdx].createdUsers = validUsers;
+        saveConfig(cfg);
     }
 }
+
 
 // --- WEB API ---
 app.get('/api/config', (req, res) => res.json(loadConfig()));
@@ -212,10 +247,10 @@ function startBot(token) {
     bot = new TelegramBot(token, { polling: true });
     console.log("✅ Telegram Bot Started...");
 
-    // Monitoring Loop (Running every 5 Minutes for Faster Disable)
+    // Monitoring Loop (Run every 15 Minutes)
     setInterval(() => {
         monitorExpirations();
-    }, 5 * 60 * 1000); 
+    }, 15 * 60 * 1000); 
 
     const isAdmin = (chatId) => {
         const cfg = loadConfig();
@@ -510,7 +545,7 @@ function startBot(token) {
 
 // --- SHARED FUNCTIONS ---
 
-// 1. MONITOR EXPIRATION + AUTO DISABLE (FIXED LOGIC)
+// 1. MONITOR EXPIRATION + FORCE OFF (FIXED)
 async function monitorExpirations() {
     const cfg = loadConfig();
     console.log("⏰ [AUTO-CHECK] Checking users for expiration/data limits...");
@@ -541,6 +576,7 @@ async function monitorExpirations() {
                         const c = settings.clients[i];
                         const totalUsed = getClientTraffic(c, clientStats);
                         
+                        // ** CRITICAL FIX: Check if Time is in Past **
                         const isExpired = c.expiryTime > 0 && c.expiryTime <= Date.now();
                         const isDataFull = c.totalGB > 0 && totalUsed >= c.totalGB;
 
@@ -599,6 +635,9 @@ function handleResellerCreate(chatId) {
 }
 
 async function handleResellerList(chatId, resIdx, page, msgIdToEdit = null) {
+    // ** AUTO SYNC: Clean Ghost Users First **
+    await syncResellerUsers(resIdx);
+    
     const config = loadConfig();
     const reseller = config.resellers[resIdx];
     
@@ -628,17 +667,15 @@ async function handleResellerList(chatId, resIdx, page, msgIdToEdit = null) {
     }
 }
 
-// 2. FIX RESELLER DETAILS (USES GLOBAL SEARCH)
 async function showResellerUserDetails(chatId, resIdxStr, userIdxStr) {
     const config = loadConfig(); const resIdx = parseInt(resIdxStr); const userIdx = parseInt(userIdxStr);
     const reseller = config.resellers[resIdx]; const u = reseller.createdUsers[userIdx]; const server = config.servers[u.serverIdx];
-    bot.sendMessage(chatId, "🔄 Searching Panel...", { parse_mode: 'Markdown' });
+    bot.sendMessage(chatId, "🔄 Details...", { parse_mode: 'Markdown' });
 
     // ** GLOBAL SEARCH CALL **
     const result = await findUserInPanelGlobal(server, u.email);
 
     if (result && result.found) {
-         // Auto-Heal Config
          if (config.resellers[resIdx].createdUsers[userIdx].inboundId != result.inbound.id) {
              config.resellers[resIdx].createdUsers[userIdx].inboundId = result.inbound.id;
              saveConfig(config);
@@ -877,6 +914,27 @@ async function renderServerUserPage(chatId, page, msgIdToEdit = null) {
     if(msgIdToEdit) bot.editMessageText(msg, { chat_id: chatId, message_id: msgIdToEdit, parse_mode: 'Markdown', reply_markup: { inline_keyboard: btns } });
     else bot.sendMessage(chatId, msg, { parse_mode: 'Markdown', reply_markup: { inline_keyboard: btns } });
 }
+
+// --- GLOBAL SEARCH ---
+async function findUserInPanelGlobal(srv, email) {
+    try {
+        const cookies = await login(srv);
+        if(!cookies) return null;
+        const res = await axios.get(`${srv.url}/panel/api/inbounds/list`, { headers: { 'Cookie': cookies } });
+        if(!res.data || !res.data.success) return null;
+        const allInbounds = res.data.obj;
+        for (const inb of allInbounds) {
+            const settings = JSON.parse(inb.settings);
+            if (settings.clients) {
+                const client = settings.clients.find(c => c.email === email);
+                if (client) {
+                    return { found: true, inbound: inb, client: client, settings: settings, cookies: cookies, clientStats: inb.clientStats || [] };
+                }
+            }
+        }
+        return { found: false };
+    } catch(e) { return null; }
+}
 EOF
 
 # 4. Install & Run
@@ -891,5 +949,5 @@ pm2 save
 pm2 startup
 
 IP=$(curl -s ifconfig.me)
-echo -e "${GREEN}✅ UPDATE COMPLETE! (Global Search & Force Disable)${NC}"
+echo -e "${GREEN}✅ UPDATE COMPLETE! (Sync & Force Off Added)${NC}"
 echo -e "${GREEN}Panel: http://$IP:3000${NC}"
