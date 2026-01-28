@@ -1,10 +1,11 @@
 #!/bin/bash
 
-# 3xbot Ultimate Installer (v9.9.3 - Server Name in Lists)
+# 3xbot Ultimate Installer (v9.9.4 - All Server Keys Manager)
 # Updates:
-# 1. Admin Reseller View: Now shows [ServerName] next to user.
-# 2. Reseller Extend View: Ensures [ServerName] is visible for all users.
-# 3. SYNC: Auto-syncs status and handles multi-server user lists.
+# 1. Added "All Server Keys" button in Admin Panel.
+# 2. Aggregates users from ALL servers into a single paginated list.
+# 3. Inline buttons format: Icon + [ServerName] + Username.
+# 4. Added Global Admin Control (Delete/Renew) for these users.
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -13,7 +14,7 @@ CYAN='\033[0;36m'
 NC='\033[0m'
 
 echo -e "${CYAN}=====================================================${NC}"
-echo -e "${CYAN}    3xbot Installer v9.9.3 (Server Name Display)     ${NC}"
+echo -e "${CYAN}    3xbot Installer v9.9.4 (All Server Manager)      ${NC}"
 echo -e "${CYAN}=====================================================${NC}"
 
 # Check Root
@@ -37,7 +38,7 @@ cd "$PROJECT_DIR"
 cat > package.json <<EOF
 {
   "name": "3xbot-manager",
-  "version": "9.9.3",
+  "version": "9.9.4",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
@@ -92,7 +93,7 @@ if [ ! -f config.json ]; then
 EOF
 fi
 
-# 3. Create index.js (UPDATED: Server Names in Lists)
+# 3. Create index.js (UPDATED: All Server Logic)
 cat > index.js <<'EOF'
 const express = require('express');
 const bodyParser = require('body-parser');
@@ -113,7 +114,7 @@ app.use(cors());
 app.use(bodyParser.json());
 app.use(express.static('public'));
 
-const axiosInstance = axios.create({ timeout: 15000 });
+const axiosInstance = axios.create({ timeout: 10000 }); // 10s Timeout prevents hanging
 
 // State Management
 let pendingOrders = {}; 
@@ -163,7 +164,7 @@ function getClientTraffic(client, clientStats) {
     return Number(client.up || 0) + Number(client.down || 0);
 }
 
-// --- SYNC USERS (Status Update) ---
+// --- SYNC USERS ---
 async function syncResellerUsers(resIdx) {
     let cfg = loadConfig();
     const reseller = cfg.resellers[resIdx];
@@ -191,7 +192,6 @@ async function syncResellerUsers(resIdx) {
                     const settings = JSON.parse(inb.settings);
                     if (settings.clients) settings.clients.forEach(c => remoteStatus[c.email] = c.enable);
                 });
-                
                 localUsers.forEach(u => {
                     if (remoteStatus.hasOwnProperty(u.email)) {
                         if (u.enabled !== remoteStatus[u.email]) {
@@ -207,7 +207,6 @@ async function syncResellerUsers(resIdx) {
             } else validUsers.push(...localUsers);
         } catch (e) { validUsers.push(...localUsers); }
     }
-    
     if (hasChanges) {
         cfg.resellers[resIdx].createdUsers = validUsers;
         saveConfig(cfg);
@@ -252,7 +251,6 @@ if (config.telegram && config.telegram.token && config.telegram.token.length > 1
 function startBot(token) {
     bot = new TelegramBot(token, { polling: true });
     console.log("✅ Telegram Bot Started...");
-
     startMonitoringLoop(); 
 
     const isAdmin = (chatId) => {
@@ -270,6 +268,7 @@ function startBot(token) {
 
     const sendAdminMenu = (chatId) => {
         const kb = [
+            [{ text: "🔑 All Server Keys" }],
             [{ text: "📢 Broadcast Message" }, { text: "👥 Reseller User" }], 
             [{ text: "💰 Reseller TopUp" }], 
             [{ text: "🔙 Back to Main Menu" }]
@@ -348,6 +347,14 @@ function startBot(token) {
 
         if (isAdmin(chatId)) {
             if (text === "🔙 Back to Main Menu") { delete adminSession[chatId]; sendMainMenu(chatId); return; }
+            
+            // --- ALL SERVER KEYS LOGIC ---
+            if (text === "🔑 All Server Keys") {
+                bot.sendMessage(chatId, "🔄 **Fetching users from all servers...**\n(Please wait, this may take a moment)", {parse_mode: 'Markdown'});
+                await fetchAllServerUsers(chatId);
+                return;
+            }
+
             if (text === "📢 Broadcast Message") { adminSession[chatId] = { state: 'WAIT_BROADCAST' }; return bot.sendMessage(chatId, "📢 Send message."); }
             if (adminSession[chatId]?.state === 'WAIT_BROADCAST') {
                 const users = currentCfg.allUsers || [];
@@ -468,13 +475,34 @@ function startBot(token) {
                 delete pendingOrders[uId];
             }
         }
-        if (data.startsWith('admsrv_')) { await fetchAndShowServerUsers(chatId, parseInt(data.split('_')[1]), 0, query.message.message_id); }
-        if (data.startsWith('srvpage_')) { 
-            if (!adminSession[chatId] || adminSession[chatId].type !== 'SERVER_VIEW') {
-                 return bot.answerCallbackQuery(query.id, { text: "⚠️ Session Expired. Please click 'Server List' again.", show_alert: true });
-            }
-            await renderServerUserPage(chatId, parseInt(data.split('_')[1]), query.message.message_id); 
+        // --- ALL SERVER CALLBACKS ---
+        if (data.startsWith('allu_page_')) {
+            const page = parseInt(data.split('_')[2]);
+            await renderAllUsersPage(chatId, page, query.message.message_id);
         }
+        if (data.startsWith('allu_view_')) {
+            const index = parseInt(data.split('_')[2]);
+            await showGlobalUserDetail(chatId, index);
+        }
+        if (data.startsWith('allu_del_')) {
+            const index = parseInt(data.split('_')[2]);
+            await deleteGlobalUser(chatId, index, query.message.message_id);
+        }
+        if (data.startsWith('allu_ren_')) {
+            const [_, __, indexStr, planIdxStr] = data.split('_');
+            const index = parseInt(indexStr);
+            const planIdx = parseInt(planIdxStr);
+            if (isNaN(planIdx)) {
+                // Show Plan Selection
+                const planBtns = currentCfg.plans.map((p, idx) => [{ text: `${p.days}Days ${p.limitGB}GB`, callback_data: `allu_ren_${index}_${idx}` }]);
+                planBtns.push([{ text: "🔙 Back", callback_data: `allu_view_${index}` }]);
+                bot.editMessageText("⏳ **Select Renew Plan:**", { chat_id: chatId, message_id: query.message.message_id, reply_markup: { inline_keyboard: planBtns }, parse_mode: 'Markdown' });
+            } else {
+                // Do Renew
+                await renewGlobalUser(chatId, index, currentCfg.plans[planIdx]);
+            }
+        }
+
         if (data.startsWith('admviewres_')) { await handleAdminResellerUserList(chatId, parseInt(data.split('_')[1]), 0); }
         if (data.startsWith('admu_page_')) { const [_, resIdx, page] = data.split('_'); await handleAdminResellerUserList(chatId, parseInt(resIdx), parseInt(page), query.message.message_id); }
         if (data.startsWith('admshowu_')) { const [_, resIdx, userIdx] = data.split('_'); await showAdminResellerUserDetails(chatId, resIdx, userIdx); }
@@ -526,11 +554,206 @@ function startBot(token) {
     });
 }
 
+// --- ALL SERVER LOGIC IMPLEMENTATION ---
+
+async function fetchAllServerUsers(chatId) {
+    const config = loadConfig();
+    let allAggregatedUsers = [];
+
+    // Iterate through all servers safely
+    for (let i = 0; i < config.servers.length; i++) {
+        const srv = config.servers[i];
+        try {
+            const cookies = await login(srv);
+            if (cookies) {
+                const res = await axiosInstance.get(`${srv.url}/panel/api/inbounds/list`, { headers: { 'Cookie': cookies } });
+                if (res.data && res.data.success) {
+                    const inbounds = res.data.obj;
+                    inbounds.forEach(inb => {
+                        const settings = JSON.parse(inb.settings);
+                        if (settings.clients) {
+                            settings.clients.forEach(c => {
+                                allAggregatedUsers.push({
+                                    email: c.email,
+                                    name: c.email.split('_')[0], // Guess name
+                                    enable: c.enable,
+                                    expiryTime: c.expiryTime,
+                                    totalGB: c.totalGB,
+                                    serverIdx: i,
+                                    inboundId: inb.id,
+                                    serverName: srv.name
+                                });
+                            });
+                        }
+                    });
+                }
+            }
+        } catch (e) {
+            console.log(`[ALL_KEYS] Failed to fetch server ${srv.name}: ${e.message}`);
+        }
+    }
+
+    if (allAggregatedUsers.length === 0) {
+        return bot.sendMessage(chatId, "⚠️ No users found or servers unreachable.");
+    }
+
+    // Store in session
+    adminSession[chatId] = { type: 'ALL_KEYS', users: allAggregatedUsers };
+    await renderAllUsersPage(chatId, 0);
+}
+
+async function renderAllUsersPage(chatId, page, msgIdToEdit = null) {
+    const session = adminSession[chatId];
+    if (!session || session.type !== 'ALL_KEYS') return bot.sendMessage(chatId, "⚠️ Session expired. Click 'All Server Keys' again.");
+
+    const pageSize = 10;
+    const totalUsers = session.users.length;
+    const totalPages = Math.ceil(totalUsers / pageSize);
+    const start = page * pageSize;
+    const currentUsers = session.users.slice(start, start + pageSize);
+
+    const btns = currentUsers.map((u, i) => {
+        const icon = u.enable ? "🟢" : "🔴";
+        // Inline Button: Status [Server] Username
+        return [{ text: `${icon} [${u.serverName}] ${u.email}`, callback_data: `allu_view_${start + i}` }];
+    });
+
+    const navRow = [];
+    if (page > 0) navRow.push({ text: "⬅️ Prev", callback_data: `allu_page_${page - 1}` });
+    if (page < totalPages - 1) navRow.push({ text: "Next ➡️", callback_data: `allu_page_${page + 1}` });
+    if (navRow.length > 0) btns.push(navRow);
+    btns.push([{text: "🔙 Admin Menu", callback_data: "none"}]); // Just visual, back logic handled by text menu mostly
+
+    const text = `🌏 **All Server Keys (${totalUsers})**\nPage: ${page + 1}/${totalPages}`;
+
+    if (msgIdToEdit) {
+        try { await bot.editMessageText(text, { chat_id: chatId, message_id: msgIdToEdit, parse_mode: 'Markdown', reply_markup: { inline_keyboard: btns } }); } catch(e){}
+    } else {
+        await bot.sendMessage(chatId, text, { parse_mode: 'Markdown', reply_markup: { inline_keyboard: btns } });
+    }
+}
+
+async function showGlobalUserDetail(chatId, index) {
+    const session = adminSession[chatId];
+    if (!session || !session.users[index]) return bot.sendMessage(chatId, "⚠️ User not found in session.");
+    
+    const userSummary = session.users[index];
+    const config = loadConfig();
+    const server = config.servers[userSummary.serverIdx];
+
+    bot.sendMessage(chatId, "🔄 Fetching Details...", {parse_mode: 'Markdown'});
+    
+    const result = await findUserInPanelGlobal(server, userSummary.email);
+    if(result && result.found) {
+        const client = result.client;
+        const totalUsed = getClientTraffic(client, result.clientStats);
+        const daysLeft = client.expiryTime > 0 ? Math.ceil((client.expiryTime - Date.now()) / 86400000) : 0;
+        
+        const msg = `👮 **Admin User Control**
+-------------------------
+👤 Email: \`${client.email}\`
+🖥 Server: ${server.name}
+📡 Status: ${client.enable ? "🟢 Active" : "🔴 Disabled"}
+⏳ Remaining: ${daysLeft} Days
+📊 Used: ${formatBytes(totalUsed)} / ${formatBytes(client.totalGB)}
+📅 Expire: ${moment(client.expiryTime).format("YYYY-MM-DD")}
+
+${createProgressBar(totalUsed, client.totalGB)}`;
+
+        const btns = [
+            [{ text: "⏳ RENEW / EXTEND", callback_data: `allu_ren_${index}` }],
+            [{ text: "🗑 DELETE USER", callback_data: `allu_del_${index}` }],
+            [{ text: "🔙 Back to List", callback_data: `allu_page_0` }] // Simplification: go to start or calc page
+        ];
+        
+        bot.sendMessage(chatId, msg, { parse_mode: 'Markdown', reply_markup: { inline_keyboard: btns } });
+    } else {
+        bot.sendMessage(chatId, "❌ User disappeared from server.");
+    }
+}
+
+async function deleteGlobalUser(chatId, index, msgId) {
+    const session = adminSession[chatId];
+    if (!session || !session.users[index]) return;
+    const u = session.users[index];
+    const config = loadConfig();
+    const server = config.servers[u.serverIdx];
+
+    const result = await findUserInPanelGlobal(server, u.email);
+    if(result && result.found) {
+        try {
+            let settings = result.settings;
+            settings.clients = settings.clients.filter(c => c.email !== u.email);
+            let inbound = result.inbound;
+            let streamSettings = inbound.streamSettings;
+            let sniffing = inbound.sniffing;
+            if (typeof streamSettings === 'object') streamSettings = JSON.stringify(streamSettings);
+            if (typeof sniffing === 'object') sniffing = JSON.stringify(sniffing);
+
+            const payload = {
+                up: inbound.up, down: inbound.down, total: inbound.total, remark: inbound.remark,
+                enable: inbound.enable, expiryTime: inbound.expiryTime, listen: inbound.listen,
+                port: inbound.port, protocol: inbound.protocol,
+                settings: JSON.stringify(settings),
+                streamSettings: streamSettings, sniffing: sniffing, tag: inbound.tag
+            };
+            await axiosInstance.post(`${server.url}/panel/api/inbounds/update/${result.inbound.id}`, payload, { headers: { 'Cookie': result.cookies } });
+            
+            bot.deleteMessage(chatId, msgId);
+            bot.sendMessage(chatId, `🗑 **Deleted:** ${u.email}`);
+            
+            // Remove from session list
+            session.users.splice(index, 1);
+            // Refresh list (optional, but good)
+        } catch(e) { bot.sendMessage(chatId, "❌ Delete Failed"); }
+    }
+}
+
+async function renewGlobalUser(chatId, index, plan) {
+    const session = adminSession[chatId];
+    if (!session || !session.users[index]) return;
+    const u = session.users[index];
+    const config = loadConfig();
+    const server = config.servers[u.serverIdx];
+    
+    const result = await findUserInPanelGlobal(server, u.email);
+    if(result && result.found) {
+        try {
+            // Reset Traffic
+            try { await axiosInstance.post(`${server.url}/panel/api/inbounds/resetClientTraffic/${result.inbound.id}/${u.email}`, {}, { headers: { 'Cookie': result.cookies } }); } catch(e) {}
+            
+            const inbound = result.inbound;
+            const settings = result.settings;
+            const clientIdx = settings.clients.findIndex(c => c.email === u.email);
+            
+            settings.clients[clientIdx].expiryTime = Date.now() + (plan.days * 86400000);
+            settings.clients[clientIdx].enable = true; 
+            settings.clients[clientIdx].totalGB = plan.limitGB * 1024 * 1024 * 1024;
+
+            let streamSettings = inbound.streamSettings;
+            let sniffing = inbound.sniffing;
+            if (typeof streamSettings === 'object') streamSettings = JSON.stringify(streamSettings);
+            if (typeof sniffing === 'object') sniffing = JSON.stringify(sniffing);
+            
+            const payload = {
+                up: inbound.up, down: inbound.down, total: inbound.total, remark: inbound.remark,
+                enable: inbound.enable, expiryTime: inbound.expiryTime, listen: inbound.listen,
+                port: inbound.port, protocol: inbound.protocol,
+                settings: JSON.stringify(settings),
+                streamSettings: streamSettings, sniffing: sniffing, tag: inbound.tag
+            };
+
+            await axiosInstance.post(`${server.url}/panel/api/inbounds/update/${inbound.id}`, payload, { headers: { 'Cookie': result.cookies } });
+            
+            bot.sendMessage(chatId, `✅ **Renewed:** ${u.email}\nDays: ${plan.days}\nGB: ${plan.limitGB}`, {parse_mode:'Markdown'});
+        } catch(e) { bot.sendMessage(chatId, "❌ Renew Failed"); }
+    }
+}
+
 // --- SHARED FUNCTIONS ---
 
-// 1. MONITOR EXPIRATION + AUTO RETRY (THE NEW LOOP)
+// 1. MONITOR EXPIRATION + AUTO RETRY
 async function startMonitoringLoop() {
-    // 5 Minutes Interval
     const checkInterval = 5 * 60 * 1000; 
     while (true) {
         console.log("⏰ [AUTO-CHECK] Starting monitoring cycle...");
@@ -573,13 +796,11 @@ async function monitorExpirations() {
                             const isDataFull = c.totalGB > 0 && totalUsed >= c.totalGB;
 
                             if (isExpired || isDataFull) {
-                                // 1. Disable in Panel
                                 if (c.enable === true) {
                                     console.log(`[ACTION] Disabling ${c.email}`);
                                     settings.clients[i].enable = false; 
                                     modified = true;
 
-                                    // **SYNC LOCAL STATUS**: Update Reseller List status instantly
                                     if(cfg.resellers) {
                                         cfg.resellers.forEach(r => {
                                             if(r.createdUsers) {
@@ -590,8 +811,6 @@ async function monitorExpirations() {
                                         });
                                     }
                                 }
-
-                                // 2. Send Notification
                                 const session = cfg.activeSessions.find(s => s.email === c.email);
                                 if (session && !session.notified) {
                                     const reason = isExpired ? "📅 Plan Expired" : "📉 Data Limit Reached";
@@ -599,9 +818,7 @@ async function monitorExpirations() {
                                         await bot.sendMessage(session.chatId, `⚠️ **Service Paused**\n\nUser: ${session.email}\nReason: ${reason}`, { parse_mode: 'Markdown' });
                                         session.notified = true; 
                                         updated = true;
-                                        console.log(`[NOTIFY] Alert sent to ${session.email}`);
                                     } catch (e) {
-                                        console.log(`[NOTIFY FAILED] Could not send to ${session.email}: ${e.message}`);
                                         session.notified = true; 
                                         updated = true;
                                     }
@@ -640,7 +857,6 @@ async function monitorExpirations() {
                 success = true; 
             } catch (e) {
                 attempts++;
-                console.log(`⚠️ [RETRY] Server ${srv.name} failed (${attempts}/3). Error: ${e.message}`);
                 if (attempts < 3) await sleep(10000);
             }
         }
@@ -674,7 +890,6 @@ async function handleResellerList(chatId, resIdx, page, msgIdToEdit = null) {
     const start = page * pageSize; 
     const currentUsers = reseller.createdUsers.slice(start, start + pageSize);
     
-    // UPDATED: Now shows [ServerName]
     const btns = currentUsers.map((u, i) => {
         const icon = u.enabled === false ? "🔴" : "🟢";
         const serverName = config.servers[u.serverIdx]?.name || "Unknown";
@@ -775,7 +990,6 @@ async function renewResellerUser(chatId, resIdxStr, userIdxStr, price, days, lim
             settings.clients[clientIdx].down = 0;
             if(limitGB) settings.clients[clientIdx].totalGB = limitGB * 1024 * 1024 * 1024;
 
-            // ** REUSE PAYLOAD FIX FOR RENEW **
             let streamSettings = inbound.streamSettings;
             let sniffing = inbound.sniffing;
             if (typeof streamSettings === 'object') streamSettings = JSON.stringify(streamSettings);
@@ -818,7 +1032,6 @@ async function deleteResellerUser(chatId, resIdxStr, userIdxStr, isAdmin = false
             let settings = result.settings;
             settings.clients = settings.clients.filter(c => c.email !== userRec.email);
             
-            // ** PAYLOAD FIX FOR DELETE **
             let inbound = result.inbound;
             let streamSettings = inbound.streamSettings;
             let sniffing = inbound.sniffing;
@@ -889,14 +1102,11 @@ function handleAdminResellerList(chatId) {
     bot.sendMessage(chatId, "Select Reseller:", { reply_markup: { inline_keyboard: btns } });
 }
 async function handleAdminResellerUserList(chatId, resIdx, page, msgIdToEdit = null) {
-    // UPDATED: Sync first for admin view
     await syncResellerUsers(resIdx);
     const config = loadConfig();
     const reseller = config.resellers[resIdx];
     if (!reseller || !reseller.createdUsers || reseller.createdUsers.length === 0) return bot.sendMessage(chatId, `⚠️ **${reseller.username}** has no users.`);
     const pageSize = 10; const totalUsers = reseller.createdUsers.length; const totalPages = Math.ceil(totalUsers / pageSize); const start = page * pageSize; const currentUsers = reseller.createdUsers.slice(start, start + pageSize);
-    
-    // UPDATED: Shows [ServerName] in Admin View
     const btns = currentUsers.map((u, i) => {
         const icon = u.enabled === false ? "🔴" : "🟢";
         const serverName = config.servers[u.serverIdx]?.name || "Unknown";
@@ -909,56 +1119,6 @@ async function handleAdminResellerUserList(chatId, resIdx, page, msgIdToEdit = n
     const text = `👥 **${reseller.username}'s Users (${page + 1}/${totalPages})**`;
     if (msgIdToEdit) bot.editMessageText(text, { chat_id: chatId, message_id: msgIdToEdit, parse_mode: 'Markdown', reply_markup: { inline_keyboard: btns } });
     else bot.sendMessage(chatId, text, { parse_mode: 'Markdown', reply_markup: { inline_keyboard: btns } });
-}
-
-async function fetchAndShowServerUsers(chatId, srvIdx, page = 0, msgIdToEdit = null) {
-    const config = loadConfig();
-    const server = config.servers[srvIdx];
-    if(!server) return bot.sendMessage(chatId, "❌ Server not found.");
-    try {
-        const cookies = await login(server);
-        if(!cookies) return bot.sendMessage(chatId, "❌ Login failed.");
-        const res = await axiosInstance.get(`${server.url}/panel/api/inbounds/list`, { headers: { 'Cookie': cookies } });
-        if(res.data && res.data.success) {
-            let allClients = [];
-            res.data.obj.forEach(inb => {
-                const settings = JSON.parse(inb.settings);
-                const clientStats = inb.clientStats || []; 
-                if(settings.clients) {
-                    settings.clients.forEach(c => {
-                        const totalUsed = getClientTraffic(c, clientStats);
-                        allClients.push({ ...c, totalUsed: totalUsed, inboundTag: inb.tag, inboundId: inb.id });
-                    });
-                }
-            });
-            adminSession[chatId] = { type: 'SERVER_VIEW', clients: allClients, srvName: server.name, srvIdx: srvIdx };
-            await renderServerUserPage(chatId, page, msgIdToEdit);
-        } else bot.sendMessage(chatId, "❌ Failed to fetch list.");
-    } catch(e) { bot.sendMessage(chatId, "❌ Connection Error."); }
-}
-
-async function renderServerUserPage(chatId, page, msgIdToEdit = null) {
-    const session = adminSession[chatId];
-    if(!session || session.type !== 'SERVER_VIEW') return;
-    const pageSize = 10;
-    const totalUsers = session.clients.length;
-    const totalPages = Math.ceil(totalUsers / pageSize);
-    const start = page * pageSize;
-    const end = start + pageSize;
-    const currentUsers = session.clients.slice(start, end);
-    let msg = `🖥 **Server:** ${session.srvName}\n👥 **Total Users:** ${totalUsers}\n📄 **Page:** ${page+1}/${totalPages || 1}\n\n`;
-    currentUsers.forEach((c, i) => {
-        const daysLeft = c.expiryTime > 0 ? Math.ceil((c.expiryTime - Date.now()) / 86400000) : 0;
-        const icon = c.enable ? "🟢" : "🔴";
-        msg += `${start+i+1}. ${icon} **${c.email||'No Email'}**\n   📊 ${formatBytes(c.totalUsed)} | ⏳ ${daysLeft} Days | 📅 ${moment(c.expiryTime).format("YYYY-MM-DD")}\n\n`;
-    });
-    const btns = [];
-    const navRow = [];
-    if (page > 0) navRow.push({ text: "⬅️ Prev", callback_data: `srvpage_${page - 1}` });
-    if (page < totalPages - 1) navRow.push({ text: "Next ➡️", callback_data: `srvpage_${page + 1}` });
-    if (navRow.length > 0) btns.push(navRow);
-    if(msgIdToEdit) bot.editMessageText(msg, { chat_id: chatId, message_id: msgIdToEdit, parse_mode: 'Markdown', reply_markup: { inline_keyboard: btns } });
-    else bot.sendMessage(chatId, msg, { parse_mode: 'Markdown', reply_markup: { inline_keyboard: btns } });
 }
 
 EOF
@@ -975,5 +1135,5 @@ pm2 save
 pm2 startup
 
 IP=$(curl -s ifconfig.me)
-echo -e "${GREEN}✅ UPDATE COMPLETE! (Server Names Added)${NC}"
+echo -e "${GREEN}✅ UPDATE COMPLETE! (All Server Manager Added)${NC}"
 echo -e "${GREEN}Panel: http://$IP:3000${NC}"
