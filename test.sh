@@ -1,9 +1,10 @@
 #!/bin/bash
 
-# 3xbot Ultimate Installer (v9.2 - Traffic Stats Fix)
+# 3xbot Ultimate Installer (v9.3 - UUID Matching & Debug)
 # Updates:
-# 1. FIXED: Traffic fetch method (Now uses 'clientStats' object).
-# 2. FIXED: Solves the "0 B" issue by merging live stats with user settings.
+# 1. FIXED: Matches user by UUID (ID) if Email fails (Fixes 0B issue).
+# 2. ADDED: Debug Logs (Shows traffic data in terminal for troubleshooting).
+# 3. IMPROVED: Checks both 'clientStats' and 'settings' for data.
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -12,7 +13,7 @@ CYAN='\033[0;36m'
 NC='\033[0m'
 
 echo -e "${CYAN}=====================================================${NC}"
-echo -e "${CYAN}    3xbot Installer v9.2 (Real Traffic Fix)          ${NC}"
+echo -e "${CYAN}    3xbot Installer v9.3 (Fix 0B Traffic)            ${NC}"
 echo -e "${CYAN}=====================================================${NC}"
 
 # Check Root
@@ -36,7 +37,7 @@ cd "$PROJECT_DIR"
 cat > package.json <<EOF
 {
   "name": "3xbot-manager",
-  "version": "9.2.0",
+  "version": "9.3.0",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
@@ -91,7 +92,7 @@ if [ ! -f config.json ]; then
 EOF
 fi
 
-# 3. Create index.js (UPDATED: clientStats Logic)
+# 3. Create index.js (UPDATED: UUID Matching & Debugging)
 cat > index.js <<'EOF'
 const express = require('express');
 const bodyParser = require('body-parser');
@@ -144,6 +145,33 @@ function createProgressBar(current, total, size = 10) {
     const filled = Math.round(size * percent);
     const empty = size - filled;
     return '▓'.repeat(filled) + '░'.repeat(empty) + ` ${Math.round(percent * 100)}%`;
+}
+
+// --- TRAFFIC FINDER HELPER (The Fix) ---
+function getClientTraffic(client, clientStats) {
+    // 1. Try to find in clientStats (Live Data)
+    if (clientStats && Array.isArray(clientStats)) {
+        // Match by UUID (Most accurate) OR Email
+        const stat = clientStats.find(s => 
+            (s.id && s.id === client.id) || 
+            (s.uuid && s.uuid === client.id) || 
+            (s.email && client.email && s.email.trim() === client.email.trim())
+        );
+        
+        if (stat) {
+            console.log(`[DEBUG] Found Stats for ${client.email}: Up=${stat.up}, Down=${stat.down}`);
+            return Number(stat.up || 0) + Number(stat.down || 0);
+        }
+    }
+
+    // 2. Fallback to Settings Data (Some panels store it here)
+    if (client.up || client.down) {
+        console.log(`[DEBUG] Fallback Stats for ${client.email}: Up=${client.up}, Down=${client.down}`);
+        return Number(client.up || 0) + Number(client.down || 0);
+    }
+
+    console.log(`[DEBUG] No stats found for ${client.email} (UUID: ${client.id})`);
+    return 0;
 }
 
 // --- WEB API ---
@@ -462,7 +490,6 @@ function startBot(token) {
 
 // --- SHARED FUNCTIONS ---
 
-// 1. Monitor Expiration with Stats Fix
 async function monitorExpirations() {
     const cfg = loadConfig();
     console.log("⏰ Checking expirations...");
@@ -483,24 +510,14 @@ async function monitorExpirations() {
             const inbounds = res.data.obj;
             let serverClients = [];
 
-            // Updated Logic: Merge Settings with clientStats
             inbounds.forEach(inb => {
                 const settings = JSON.parse(inb.settings);
-                const clientStats = inb.clientStats || []; // Capture live stats
+                const clientStats = inb.clientStats || []; 
 
                 if (settings.clients) {
                     settings.clients.forEach(c => {
-                        // Find matching stat for this client email
-                        const stat = clientStats.find(s => s.email === c.email);
-                        const liveUp = stat ? stat.up : (c.up || 0);
-                        const liveDown = stat ? stat.down : (c.down || 0);
-                        
-                        // Push merged object
-                        serverClients.push({
-                            ...c,
-                            up: liveUp,
-                            down: liveDown
-                        });
+                        const totalUsed = getClientTraffic(c, clientStats);
+                        serverClients.push({ ...c, totalUsed: totalUsed });
                     });
                 }
             });
@@ -512,9 +529,8 @@ async function monitorExpirations() {
 
                 const clientData = serverClients.find(c => c.email === session.email);
                 if (clientData) {
-                    const totalUsed = Number(clientData.up) + Number(clientData.down);
                     const isExpired = clientData.expiryTime > 0 && clientData.expiryTime <= Date.now();
-                    const isDataFull = clientData.totalGB > 0 && totalUsed >= clientData.totalGB;
+                    const isDataFull = clientData.totalGB > 0 && clientData.totalUsed >= clientData.totalGB;
 
                     if (isExpired || isDataFull) {
                         const reason = isExpired ? "📅 Plan Expired" : "📉 Data Limit Reached";
@@ -555,7 +571,6 @@ async function handleResellerList(chatId, resIdx, page, msgIdToEdit = null) {
         if(msgIdToEdit) bot.deleteMessage(chatId, msgIdToEdit);
         return bot.sendMessage(chatId, "⚠️ Session Expired. Please login again.");
     }
-
     if (!reseller.createdUsers || reseller.createdUsers.length === 0) {
         return bot.sendMessage(chatId, "⚠️ No users created yet.");
     }
@@ -565,26 +580,20 @@ async function handleResellerList(chatId, resIdx, page, msgIdToEdit = null) {
     const totalPages = Math.ceil(totalUsers / pageSize); 
     const start = page * pageSize; 
     const currentUsers = reseller.createdUsers.slice(start, start + pageSize);
-    
     const btns = currentUsers.map((u, i) => [{ text: `[${config.servers[u.serverIdx]?.name||'?'}] ${u.name}`, callback_data: `rview_${resIdx}_${start + i}` }]);
-    
     const navRow = [];
     if (page > 0) navRow.push({ text: "⬅️", callback_data: `rpage_${resIdx}_${page - 1}` });
     if (page < totalPages - 1) navRow.push({ text: "➡️", callback_data: `rpage_${resIdx}_${page + 1}` });
-    
     if (navRow.length > 0) btns.push(navRow);
     const text = `👥 **User Management (${page + 1}/${totalPages})**`;
-    
     if (msgIdToEdit) {
-        try {
-            await bot.editMessageText(text, { chat_id: chatId, message_id: msgIdToEdit, parse_mode: 'Markdown', reply_markup: { inline_keyboard: btns } });
-        } catch(e) {}
+        try { await bot.editMessageText(text, { chat_id: chatId, message_id: msgIdToEdit, parse_mode: 'Markdown', reply_markup: { inline_keyboard: btns } }); } catch(e) {}
     } else {
         bot.sendMessage(chatId, text, { parse_mode: 'Markdown', reply_markup: { inline_keyboard: btns } });
     }
 }
 
-// 2. Fix Reseller Details View (Uses clientStats)
+// 2. Fix Reseller Details View (Uses UUID + Email Match)
 async function showResellerUserDetails(chatId, resIdxStr, userIdxStr) {
     const config = loadConfig(); const resIdx = parseInt(resIdxStr); const userIdx = parseInt(userIdxStr);
     const reseller = config.resellers[resIdx]; const u = reseller.createdUsers[userIdx]; const server = config.servers[u.serverIdx];
@@ -592,66 +601,70 @@ async function showResellerUserDetails(chatId, resIdxStr, userIdxStr) {
     try {
         const cookies = await login(server);
         if(!cookies) return bot.sendMessage(chatId, "❌ Server Error");
-        const inboundRes = await axios.get(`${server.url}/panel/api/inbounds/get/${u.inboundId}`, { headers: { 'Cookie': cookies } });
+        
+        // ** CRITICAL: Use /list endpoint to ensure clientStats is present **
+        const inboundRes = await axios.get(`${server.url}/panel/api/inbounds/list`, { headers: { 'Cookie': cookies } });
+        
         if(inboundRes.data && inboundRes.data.success) {
-            const inboundObj = inboundRes.data.obj;
-            const settings = JSON.parse(inboundObj.settings);
-            const clientStats = inboundObj.clientStats || []; // Grab Stats
+            const allInbounds = inboundRes.data.obj;
+            // Find specific inbound manually
+            const inboundObj = allInbounds.find(i => i.id == u.inboundId);
 
-            const client = settings.clients.find(c => c.email === u.email);
-            if(client) {
-                 // ** FIX: Look for live stats **
-                 const stat = clientStats.find(s => s.email === u.email);
-                 const liveUp = stat ? Number(stat.up) : Number(client.up||0);
-                 const liveDown = stat ? Number(stat.down) : Number(client.down||0);
-                 const totalUsed = liveUp + liveDown;
-
-                 const daysLeft = client.expiryTime > 0 ? Math.ceil((client.expiryTime - Date.now()) / 86400000) : 0;
-                 const usedStr = formatBytes(totalUsed); 
-                 const freeStr = formatBytes(client.totalGB - totalUsed);
-                 const expStr = moment(client.expiryTime).format("YYYY-MM-DD");
-                 const status = client.enable ? "🟢 Active" : "🔴 Disabled";
-                 const protocolName = inboundObj.protocol === 'vmess' ? 'VMess' : (inboundObj.protocol === 'vless' ? 'VLESS' : 'Shadowsocks');
-                 const msg = `👮 **User Management**
+            if(inboundObj) {
+                const settings = JSON.parse(inboundObj.settings);
+                const clientStats = inboundObj.clientStats || []; 
+                
+                // Match by Email
+                const client = settings.clients.find(c => c.email === u.email);
+                
+                if(client) {
+                     const totalUsed = getClientTraffic(client, clientStats);
+                     const daysLeft = client.expiryTime > 0 ? Math.ceil((client.expiryTime - Date.now()) / 86400000) : 0;
+                     const status = client.enable ? "🟢 Active" : "🔴 Disabled";
+                     const protocolName = inboundObj.protocol === 'vmess' ? 'VMess' : (inboundObj.protocol === 'vless' ? 'VLESS' : 'Shadowsocks');
+                     const msg = `👮 **User Management**
 -------------------------
 👤 Name: ${u.name}
 🖥 Server: ${server.name}
 🔌 Protocol: ${protocolName}
 📡 Status: ${status}
 ⏳ Remaining: ${daysLeft} Days
-📊 Used: ${usedStr}
-🎁 Free: ${freeStr}
-📅 Expire: ${expStr}
+📊 Used: ${formatBytes(totalUsed)}
+🎁 Free: ${formatBytes(client.totalGB - totalUsed)}
+📅 Expire: ${moment(client.expiryTime).format("YYYY-MM-DD")}
 
 ${createProgressBar(totalUsed, client.totalGB)}`;
-                 const btns = [[{ text: "⏳ RENEW", callback_data: `rshowren_${resIdx}_${userIdx}` }], [{ text: "🗑 DELETE", callback_data: `rdel_${resIdx}_${userIdx}` }]];
-                 await bot.sendMessage(chatId, msg, { parse_mode: 'Markdown', reply_markup: { inline_keyboard: btns } });
-            } else bot.sendMessage(chatId, "❌ User deleted.");
+                     const btns = [[{ text: "⏳ RENEW", callback_data: `rshowren_${resIdx}_${userIdx}` }], [{ text: "🗑 DELETE", callback_data: `rdel_${resIdx}_${userIdx}` }]];
+                     await bot.sendMessage(chatId, msg, { parse_mode: 'Markdown', reply_markup: { inline_keyboard: btns } });
+                     return;
+                }
+            }
         }
-    } catch(e) { bot.sendMessage(chatId, "❌ Error."); }
+        bot.sendMessage(chatId, "❌ User not found or server error.");
+    } catch(e) { console.log(e); bot.sendMessage(chatId, "❌ Error."); }
 }
 
-// 3. Fix Admin User Details (Uses clientStats)
+// 3. Fix Admin User Details (Uses UUID + Email Match)
 async function showAdminResellerUserDetails(chatId, resIdxStr, userIdxStr) {
     const config = loadConfig(); const resIdx = parseInt(resIdxStr); const userIdx = parseInt(userIdxStr);
     const reseller = config.resellers[resIdx]; const u = reseller.createdUsers[userIdx]; const server = config.servers[u.serverIdx];
     try {
-        const cookies = await login(server); const inboundRes = await axios.get(`${server.url}/panel/api/inbounds/get/${u.inboundId}`, { headers: { 'Cookie': cookies } });
-        const inboundObj = inboundRes.data.obj;
-        const settings = JSON.parse(inboundObj.settings); 
-        const clientStats = inboundObj.clientStats || [];
+        const cookies = await login(server); 
+        // Use /list for robust stats
+        const inboundRes = await axios.get(`${server.url}/panel/api/inbounds/list`, { headers: { 'Cookie': cookies } });
+        
+        const allInbounds = inboundRes.data.obj;
+        const inboundObj = allInbounds.find(i => i.id == u.inboundId);
+        
+        if (inboundObj) {
+            const settings = JSON.parse(inboundObj.settings); 
+            const clientStats = inboundObj.clientStats || [];
+            const client = settings.clients.find(c => c.email === u.email);
 
-        const client = settings.clients.find(c => c.email === u.email);
-        
-        // ** FIX: Traffic calculation **
-        const stat = clientStats.find(s => s.email === u.email);
-        const liveUp = stat ? Number(stat.up) : Number(client.up||0);
-        const liveDown = stat ? Number(stat.down) : Number(client.down||0);
-        const totalUsed = liveUp + liveDown;
-        
-        const protocolName = inboundObj.protocol === 'vmess' ? 'VMess' : (inboundObj.protocol === 'vless' ? 'VLESS' : 'Shadowsocks');
-        
-        const msg = `👮 **Admin User Control**
+            if (client) {
+                const totalUsed = getClientTraffic(client, clientStats);
+                const protocolName = inboundObj.protocol === 'vmess' ? 'VMess' : (inboundObj.protocol === 'vless' ? 'VLESS' : 'Shadowsocks');
+                const msg = `👮 **Admin User Control**
 -------------------------
 👤 Name: ${u.name}
 🖥 Server: ${server.name}
@@ -663,9 +676,13 @@ async function showAdminResellerUserDetails(chatId, resIdxStr, userIdxStr) {
 📅 Expire: ${moment(client.expiryTime).format("YYYY-MM-DD")}
 
 ${createProgressBar(totalUsed, client.totalGB)}`;
-        const btns = [[{ text: "⏳ ADMIN RENEW", callback_data: `admren_${resIdx}_${userIdx}` }], [{ text: "🗑 ADMIN DELETE", callback_data: `admdel_${resIdx}_${userIdx}` }]];
-        bot.sendMessage(chatId, msg, { parse_mode: 'Markdown', reply_markup: { inline_keyboard: btns } });
-    } catch(e) { bot.sendMessage(chatId, "Error"); }
+                const btns = [[{ text: "⏳ ADMIN RENEW", callback_data: `admren_${resIdx}_${userIdx}` }], [{ text: "🗑 ADMIN DELETE", callback_data: `admdel_${resIdx}_${userIdx}` }]];
+                bot.sendMessage(chatId, msg, { parse_mode: 'Markdown', reply_markup: { inline_keyboard: btns } });
+                return;
+            }
+        }
+        bot.sendMessage(chatId, "❌ User Not Found");
+    } catch(e) { console.log(e); bot.sendMessage(chatId, "Error"); }
 }
 
 async function renewResellerUser(chatId, resIdxStr, userIdxStr, price, days, limitGB, isAdmin = false) {
@@ -780,7 +797,7 @@ function handleAdminResellerUserList(chatId, resIdx, page, msgIdToEdit = null) {
     else bot.sendMessage(chatId, text, { parse_mode: 'Markdown', reply_markup: { inline_keyboard: btns } });
 }
 
-// 4. Fix Server User List (Uses clientStats)
+// 4. Fix Server User List (Uses UUID + Email Match)
 async function fetchAndShowServerUsers(chatId, srvIdx, page = 0, msgIdToEdit = null) {
     const config = loadConfig();
     const server = config.servers[srvIdx];
@@ -793,18 +810,14 @@ async function fetchAndShowServerUsers(chatId, srvIdx, page = 0, msgIdToEdit = n
             let allClients = [];
             res.data.obj.forEach(inb => {
                 const settings = JSON.parse(inb.settings);
-                const clientStats = inb.clientStats || []; // Capture stats
+                const clientStats = inb.clientStats || []; 
                 
                 if(settings.clients) {
                     settings.clients.forEach(c => {
-                        const stat = clientStats.find(s => s.email === c.email);
-                        const liveUp = stat ? Number(stat.up) : Number(c.up||0);
-                        const liveDown = stat ? Number(stat.down) : Number(c.down||0);
-                        
+                        const totalUsed = getClientTraffic(c, clientStats);
                         allClients.push({ 
                             ...c, 
-                            up: liveUp,
-                            down: liveDown,
+                            totalUsed: totalUsed,
                             inboundTag: inb.tag, 
                             inboundId: inb.id 
                         });
@@ -827,10 +840,9 @@ async function renderServerUserPage(chatId, page, msgIdToEdit = null) {
     const currentUsers = session.clients.slice(start, end);
     let msg = `🖥 **Server:** ${session.srvName}\n👥 **Total Users:** ${totalUsers}\n📄 **Page:** ${page+1}/${totalPages || 1}\n\n`;
     currentUsers.forEach((c, i) => {
-        const totalUsed = Number(c.up) + Number(c.down);
         const daysLeft = c.expiryTime > 0 ? Math.ceil((c.expiryTime - Date.now()) / 86400000) : 0;
         const icon = c.enable ? "🟢" : "🔴";
-        msg += `${start+i+1}. ${icon} **${c.email||'No Email'}**\n   📊 ${formatBytes(totalUsed)} | ⏳ ${daysLeft} Days | 📅 ${moment(c.expiryTime).format("YYYY-MM-DD")}\n\n`;
+        msg += `${start+i+1}. ${icon} **${c.email||'No Email'}**\n   📊 ${formatBytes(c.totalUsed)} | ⏳ ${daysLeft} Days | 📅 ${moment(c.expiryTime).format("YYYY-MM-DD")}\n\n`;
     });
     const btns = [];
     const navRow = [];
@@ -854,5 +866,5 @@ pm2 save
 pm2 startup
 
 IP=$(curl -s ifconfig.me)
-echo -e "${GREEN}✅ UPDATE COMPLETE! (Real Traffic Fixed)${NC}"
+echo -e "${GREEN}✅ UPDATE COMPLETE! (UUID Match Added)${NC}"
 echo -e "${GREEN}Panel: http://$IP:3000${NC}"
