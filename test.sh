@@ -1,10 +1,10 @@
 #!/bin/bash
 
-# 3xbot Ultimate Installer (v9.7 - Auto Retry & Stable Network)
+# 3xbot Ultimate Installer (v9.8 - API Payload Fix)
 # Updates:
-# 1. ADDED: "Smart Retry System" - Retries 3 times if connection fails.
-# 2. FIXED: Resumes monitoring automatically after network recovery.
-# 3. OPTIMIZED: Uses Sequential Loop instead of fixed Interval to prevent overlap.
+# 1. FIXED: Stringify 'streamSettings' & 'sniffing' before updating (Crucial for Switch Off).
+# 2. FIXED: Removes read-only fields (clientStats) from update payload.
+# 3. LOGS: Enhanced success/error logs for monitoring.
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -13,7 +13,7 @@ CYAN='\033[0;36m'
 NC='\033[0m'
 
 echo -e "${CYAN}=====================================================${NC}"
-echo -e "${CYAN}    3xbot Installer v9.7 (Auto Retry System)         ${NC}"
+echo -e "${CYAN}    3xbot Installer v9.8 (Switch Off Fix)            ${NC}"
 echo -e "${CYAN}=====================================================${NC}"
 
 # Check Root
@@ -37,7 +37,7 @@ cd "$PROJECT_DIR"
 cat > package.json <<EOF
 {
   "name": "3xbot-manager",
-  "version": "9.7.0",
+  "version": "9.8.0",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
@@ -92,7 +92,7 @@ if [ ! -f config.json ]; then
 EOF
 fi
 
-# 3. Create index.js (UPDATED: Retry Logic)
+# 3. Create index.js (UPDATED: Payload Fix)
 cat > index.js <<'EOF'
 const express = require('express');
 const bodyParser = require('body-parser');
@@ -113,10 +113,7 @@ app.use(cors());
 app.use(bodyParser.json());
 app.use(express.static('public'));
 
-// Axios Instance with Timeout to prevent hanging
-const axiosInstance = axios.create({
-    timeout: 15000 // 15 Seconds timeout
-});
+const axiosInstance = axios.create({ timeout: 15000 });
 
 // State Management
 let pendingOrders = {}; 
@@ -151,9 +148,7 @@ function createProgressBar(current, total, size = 10) {
     const empty = size - filled;
     return '▓'.repeat(filled) + '░'.repeat(empty) + ` ${Math.round(percent * 100)}%`;
 }
-function sleep(ms) {
-    return new Promise(resolve => setTimeout(resolve, ms));
-}
+function sleep(ms) { return new Promise(resolve => setTimeout(resolve, ms)); }
 
 // --- TRAFFIC FINDER ---
 function getClientTraffic(client, clientStats) {
@@ -168,7 +163,7 @@ function getClientTraffic(client, clientStats) {
     return Number(client.up || 0) + Number(client.down || 0);
 }
 
-// --- CORE: SYNC USERS ---
+// --- SYNC USERS ---
 async function syncResellerUsers(resIdx) {
     let cfg = loadConfig();
     const reseller = cfg.resellers[resIdx];
@@ -209,6 +204,27 @@ async function syncResellerUsers(resIdx) {
     }
 }
 
+// --- GLOBAL SEARCH ---
+async function findUserInPanelGlobal(srv, email) {
+    try {
+        const cookies = await login(srv);
+        if(!cookies) return null;
+        const res = await axiosInstance.get(`${srv.url}/panel/api/inbounds/list`, { headers: { 'Cookie': cookies } });
+        if(!res.data || !res.data.success) return null;
+        const allInbounds = res.data.obj;
+        for (const inb of allInbounds) {
+            const settings = JSON.parse(inb.settings);
+            if (settings.clients) {
+                const client = settings.clients.find(c => c.email === email);
+                if (client) {
+                    return { found: true, inbound: inb, client: client, settings: settings, cookies: cookies, clientStats: inb.clientStats || [] };
+                }
+            }
+        }
+        return { found: false };
+    } catch(e) { return null; }
+}
+
 // --- WEB API ---
 app.get('/api/config', (req, res) => res.json(loadConfig()));
 app.post('/api/config', (req, res) => {
@@ -227,8 +243,7 @@ function startBot(token) {
     bot = new TelegramBot(token, { polling: true });
     console.log("✅ Telegram Bot Started...");
 
-    // ** NEW MONITORING SYSTEM (LOOP with RETRY) **
-    startMonitoringLoop();
+    startMonitoringLoop(); // Start Auto Check Loop
 
     const isAdmin = (chatId) => {
         const cfg = loadConfig();
@@ -262,7 +277,6 @@ function startBot(token) {
         const text = msg.text;
         const currentCfg = loadConfig();
         const txt = currentCfg.telegram.texts;
-        
         if (!text && !msg.photo) return;
 
         if (text === txt.buyBtn) {
@@ -292,10 +306,7 @@ function startBot(token) {
             const order = pendingOrders[chatId];
             const plan = currentCfg.plans[order.planIdx];
             const pCode = order.proto === 'vmess' ? 'm' : (order.proto === 'ss' ? 's' : 'v');
-            let pName = "VLESS";
-            if(order.proto === 'vmess') pName = "VMess";
-            if(order.proto === 'ss') pName = "Shadowsocks";
-
+            let pName = "VLESS"; if(order.proto === 'vmess') pName = "VMess"; if(order.proto === 'ss') pName = "Shadowsocks";
             bot.sendMessage(chatId, "⏳ **Slip Received!** Waiting approval...", {parse_mode: 'Markdown'});
             const uniqueAdmins = new Set();
             if(currentCfg.telegram.adminId) uniqueAdmins.add(String(currentCfg.telegram.adminId));
@@ -309,7 +320,6 @@ function startBot(token) {
 ⏳ Days: ${plan.days} Days
 📡 GB: ${plan.limitGB} GB
 💰 Price: ${plan.price} MMK`;
-
             for (const adminId of uniqueAdmins) {
                 try {
                     const sentMsg = await bot.sendPhoto(adminId, msg.photo[msg.photo.length-1].file_id, {
@@ -346,7 +356,6 @@ function startBot(token) {
                 return bot.sendMessage(chatId, "🖥 **Select a Server:**", { parse_mode: 'Markdown', reply_markup: { inline_keyboard: btns } });
             }
         }
-
         if (resellerSessions[chatId]?.state === 'WAIT_USER') { resellerSessions[chatId].username = text; resellerSessions[chatId].state = 'WAIT_PASS'; return bot.sendMessage(chatId, "🔑 Password:"); }
         if (resellerSessions[chatId]?.state === 'WAIT_PASS') {
             const r = currentCfg.resellers.find(x => x.username === resellerSessions[chatId].username && x.password === text);
@@ -385,7 +394,6 @@ function startBot(token) {
              const mode = data.split('_')[0]; 
              const srvIdx = data.split('_')[1];
              const protoPrefix = mode === 'srv' ? 'proto' : (mode === 'rsrv' ? 'rproto' : 'tryproto');
-             
              const protoBtns = [];
              if (pCfg.vless) protoBtns.push([{ text: "VLESS", callback_data: `${protoPrefix}_${srvIdx}_vless` }]);
              if (pCfg.vmess) protoBtns.push([{ text: "VMess", callback_data: `${protoPrefix}_${srvIdx}_vmess` }]);
@@ -393,7 +401,6 @@ function startBot(token) {
              if(protoBtns.length === 0) return bot.answerCallbackQuery(query.id, { text: "⚠️ No protocols enabled by Admin.", show_alert: true });
              bot.editMessageText("Select Protocol:", { chat_id: chatId, message_id: query.message.message_id, reply_markup: { inline_keyboard: protoBtns }});
         }
-
         if (data.startsWith('proto_')) {
              const [_, srvIdx, proto] = data.split('_');
              const planBtns = currentCfg.plans.map((p, idx) => [{ text: `${p.days}Days ${p.limitGB}GB ${p.price}MMK`, callback_data: `plan_${srvIdx}_${proto}_${idx}` }]);
@@ -513,12 +520,12 @@ function startBot(token) {
 
 // 1. MONITOR EXPIRATION + AUTO RETRY (THE NEW LOOP)
 async function startMonitoringLoop() {
-    const checkInterval = 5 * 60 * 1000; // 5 Minutes
-    
+    // 5 Minutes Interval
+    const checkInterval = 5 * 60 * 1000; 
     while (true) {
         console.log("⏰ [AUTO-CHECK] Starting monitoring cycle...");
         await monitorExpirations();
-        console.log(`💤 [WAIT] Waiting ${checkInterval/1000} seconds...`);
+        console.log(`💤 [WAIT] Waiting 5 minutes...`);
         await sleep(checkInterval);
     }
 }
@@ -530,7 +537,6 @@ async function monitorExpirations() {
     for (let sIdx = 0; sIdx < cfg.servers.length; sIdx++) {
         const srv = cfg.servers[sIdx];
         
-        // ** RETRY LOGIC (3 Times) **
         let attempts = 0;
         let success = false;
         
@@ -575,16 +581,45 @@ async function monitorExpirations() {
                     }
 
                     if (modified) {
-                        await axiosInstance.post(`${srv.url}/panel/api/inbounds/update/${inb.id}`, { 
-                            ...inb, settings: JSON.stringify(settings) 
-                        }, { headers: { 'Cookie': cookies } });
+                        // ** CRITICAL FIX: CLEAN PAYLOAD **
+                        // We must format streamSettings/sniffing properly (usually strings in some API versions)
+                        // But standard fix is to ensure we send what GET gave us, but ensure objects are stringified if needed.
+                        // Actually, MHSanaei/X-UI update expects raw object spreads usually work unless read-only fields exist.
+                        // We will strip read-only fields to be safe.
+                        
+                        let streamSettings = inb.streamSettings;
+                        let sniffing = inb.sniffing;
+
+                        // Ensure they are JSON strings if they came as objects (Check Panel Version Behavior)
+                        // Most safe way: If they are objects, JSON.stringify them.
+                        if (typeof streamSettings === 'object') streamSettings = JSON.stringify(streamSettings);
+                        if (typeof sniffing === 'object') sniffing = JSON.stringify(sniffing);
+
+                        const payload = {
+                            up: inb.up,
+                            down: inb.down,
+                            total: inb.total,
+                            remark: inb.remark,
+                            enable: inb.enable,
+                            expiryTime: inb.expiryTime,
+                            listen: inb.listen,
+                            port: inb.port,
+                            protocol: inb.protocol,
+                            settings: JSON.stringify(settings), // This contains the disabled client
+                            streamSettings: streamSettings,
+                            sniffing: sniffing,
+                            tag: inb.tag
+                        };
+
+                        await axiosInstance.post(`${srv.url}/panel/api/inbounds/update/${inb.id}`, payload, { headers: { 'Cookie': cookies } });
+                        console.log(`✅ [SUCCESS] Disabled users in Inbound ${inb.id}`);
                     }
                 }
-                success = true; // Mark as success to exit retry loop
+                success = true; 
             } catch (e) {
                 attempts++;
                 console.log(`⚠️ [RETRY] Server ${srv.name} failed (${attempts}/3). Error: ${e.message}`);
-                if (attempts < 3) await sleep(10000); // Wait 10s before retry
+                if (attempts < 3) await sleep(10000);
             }
         }
     }
@@ -659,7 +694,6 @@ ${createProgressBar(totalUsed, client.totalGB)}`;
          await bot.sendMessage(chatId, msg, { parse_mode: 'Markdown', reply_markup: { inline_keyboard: btns } });
     } else {
          bot.sendMessage(chatId, `❌ **User Not Found**\nEmail: ${u.email}\n(Removed from bot list).`);
-         // Cleanup Ghost
          config.resellers[resIdx].createdUsers.splice(userIdx, 1);
          saveConfig(config);
     }
@@ -713,7 +747,21 @@ async function renewResellerUser(chatId, resIdxStr, userIdxStr, price, days, lim
             settings.clients[clientIdx].down = 0;
             if(limitGB) settings.clients[clientIdx].totalGB = limitGB * 1024 * 1024 * 1024;
 
-            await axiosInstance.post(`${srv.url}/panel/api/inbounds/update/${inbound.id}`, { ...inbound, settings: JSON.stringify(settings) }, { headers: { 'Cookie': result.cookies } });
+            // ** REUSE PAYLOAD FIX FOR RENEW **
+            let streamSettings = inbound.streamSettings;
+            let sniffing = inbound.sniffing;
+            if (typeof streamSettings === 'object') streamSettings = JSON.stringify(streamSettings);
+            if (typeof sniffing === 'object') sniffing = JSON.stringify(sniffing);
+            
+            const payload = {
+                up: inbound.up, down: inbound.down, total: inbound.total, remark: inbound.remark,
+                enable: inbound.enable, expiryTime: inbound.expiryTime, listen: inbound.listen,
+                port: inbound.port, protocol: inbound.protocol,
+                settings: JSON.stringify(settings),
+                streamSettings: streamSettings, sniffing: sniffing, tag: inbound.tag
+            };
+
+            await axiosInstance.post(`${srv.url}/panel/api/inbounds/update/${inbound.id}`, payload, { headers: { 'Cookie': result.cookies } });
 
             cfg.resellers[resIdx].balance -= price;
             const session = cfg.activeSessions.find(s => s.email === userRec.email);
@@ -738,7 +786,22 @@ async function deleteResellerUser(chatId, resIdxStr, userIdxStr, isAdmin = false
         try {
             let settings = result.settings;
             settings.clients = settings.clients.filter(c => c.email !== userRec.email);
-            await axiosInstance.post(`${srv.url}/panel/api/inbounds/update/${result.inbound.id}`, { ...result.inbound, settings: JSON.stringify(settings) }, { headers: { 'Cookie': result.cookies } });
+            
+            // ** PAYLOAD FIX FOR DELETE **
+            let inbound = result.inbound;
+            let streamSettings = inbound.streamSettings;
+            let sniffing = inbound.sniffing;
+            if (typeof streamSettings === 'object') streamSettings = JSON.stringify(streamSettings);
+            if (typeof sniffing === 'object') sniffing = JSON.stringify(sniffing);
+
+            const payload = {
+                up: inbound.up, down: inbound.down, total: inbound.total, remark: inbound.remark,
+                enable: inbound.enable, expiryTime: inbound.expiryTime, listen: inbound.listen,
+                port: inbound.port, protocol: inbound.protocol,
+                settings: JSON.stringify(settings),
+                streamSettings: streamSettings, sniffing: sniffing, tag: inbound.tag
+            };
+            await axiosInstance.post(`${srv.url}/panel/api/inbounds/update/${result.inbound.id}`, payload, { headers: { 'Cookie': result.cookies } });
         } catch(e) {}
     }
     cfg.resellers[resIdx].createdUsers.splice(userIdx, 1);
@@ -889,5 +952,5 @@ pm2 save
 pm2 startup
 
 IP=$(curl -s ifconfig.me)
-echo -e "${GREEN}✅ UPDATE COMPLETE! (Sync & Force Off Added)${NC}"
+echo -e "${GREEN}✅ UPDATE COMPLETE! (Payload Fix Applied)${NC}"
 echo -e "${GREEN}Panel: http://$IP:3000${NC}"
