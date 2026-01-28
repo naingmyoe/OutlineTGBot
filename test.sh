@@ -1,10 +1,10 @@
 #!/bin/bash
 
-# 3xbot Ultimate Installer (v9.3 - UUID Matching & Debug)
+# 3xbot Ultimate Installer (v9.4 - Auto Disable & Smart Search)
 # Updates:
-# 1. FIXED: Matches user by UUID (ID) if Email fails (Fixes 0B issue).
-# 2. ADDED: Debug Logs (Shows traffic data in terminal for troubleshooting).
-# 3. IMPROVED: Checks both 'clientStats' and 'settings' for data.
+# 1. FIXED: "User Not Found" error by searching all inbounds if ID mismatch.
+# 2. ADDED: Auto-Disable user in Panel if Expired or Data Limit reached.
+# 3. RETAINED: All previous traffic fixes (UUID match).
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -13,7 +13,7 @@ CYAN='\033[0;36m'
 NC='\033[0m'
 
 echo -e "${CYAN}=====================================================${NC}"
-echo -e "${CYAN}    3xbot Installer v9.3 (Fix 0B Traffic)            ${NC}"
+echo -e "${CYAN}    3xbot Installer v9.4 (Auto Disable + Smart Fix)  ${NC}"
 echo -e "${CYAN}=====================================================${NC}"
 
 # Check Root
@@ -37,7 +37,7 @@ cd "$PROJECT_DIR"
 cat > package.json <<EOF
 {
   "name": "3xbot-manager",
-  "version": "9.3.0",
+  "version": "9.4.0",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
@@ -92,7 +92,7 @@ if [ ! -f config.json ]; then
 EOF
 fi
 
-# 3. Create index.js (UPDATED: UUID Matching & Debugging)
+# 3. Create index.js (UPDATED: Auto Disable & Smart Search)
 cat > index.js <<'EOF'
 const express = require('express');
 const bodyParser = require('body-parser');
@@ -147,31 +147,17 @@ function createProgressBar(current, total, size = 10) {
     return '▓'.repeat(filled) + '░'.repeat(empty) + ` ${Math.round(percent * 100)}%`;
 }
 
-// --- TRAFFIC FINDER HELPER (The Fix) ---
+// --- TRAFFIC FINDER ---
 function getClientTraffic(client, clientStats) {
-    // 1. Try to find in clientStats (Live Data)
     if (clientStats && Array.isArray(clientStats)) {
-        // Match by UUID (Most accurate) OR Email
         const stat = clientStats.find(s => 
             (s.id && s.id === client.id) || 
             (s.uuid && s.uuid === client.id) || 
             (s.email && client.email && s.email.trim() === client.email.trim())
         );
-        
-        if (stat) {
-            console.log(`[DEBUG] Found Stats for ${client.email}: Up=${stat.up}, Down=${stat.down}`);
-            return Number(stat.up || 0) + Number(stat.down || 0);
-        }
+        if (stat) return Number(stat.up || 0) + Number(stat.down || 0);
     }
-
-    // 2. Fallback to Settings Data (Some panels store it here)
-    if (client.up || client.down) {
-        console.log(`[DEBUG] Fallback Stats for ${client.email}: Up=${client.up}, Down=${client.down}`);
-        return Number(client.up || 0) + Number(client.down || 0);
-    }
-
-    console.log(`[DEBUG] No stats found for ${client.email} (UUID: ${client.id})`);
-    return 0;
+    return Number(client.up || 0) + Number(client.down || 0);
 }
 
 // --- WEB API ---
@@ -192,10 +178,10 @@ function startBot(token) {
     bot = new TelegramBot(token, { polling: true });
     console.log("✅ Telegram Bot Started...");
 
-    // Monitoring Loop (Every 60 Minutes)
+    // Monitoring Loop (Run every 30 Minutes)
     setInterval(() => {
         monitorExpirations();
-    }, 60 * 60 * 1000); 
+    }, 30 * 60 * 1000); 
 
     const isAdmin = (chatId) => {
         const cfg = loadConfig();
@@ -490,9 +476,10 @@ function startBot(token) {
 
 // --- SHARED FUNCTIONS ---
 
+// 1. MONITOR EXPIRATION + AUTO DISABLE (NEW FEATURE)
 async function monitorExpirations() {
     const cfg = loadConfig();
-    console.log("⏰ Checking expirations...");
+    console.log("⏰ Checking expirations & Auto-Disabling...");
     
     if (!cfg.activeSessions || cfg.activeSessions.length === 0) return;
 
@@ -504,42 +491,51 @@ async function monitorExpirations() {
             const cookies = await login(srv);
             if (!cookies) continue;
             
+            // Get ALL inbounds to process everyone
             const res = await axios.get(`${srv.url}/panel/api/inbounds/list`, { headers: { 'Cookie': cookies } });
             if (!res.data || !res.data.success) continue;
 
             const inbounds = res.data.obj;
-            let serverClients = [];
 
-            inbounds.forEach(inb => {
+            for (const inb of inbounds) {
                 const settings = JSON.parse(inb.settings);
-                const clientStats = inb.clientStats || []; 
+                const clientStats = inb.clientStats || [];
+                let inboundModified = false;
 
                 if (settings.clients) {
-                    settings.clients.forEach(c => {
+                    for (let i = 0; i < settings.clients.length; i++) {
+                        const c = settings.clients[i];
                         const totalUsed = getClientTraffic(c, clientStats);
-                        serverClients.push({ ...c, totalUsed: totalUsed });
-                    });
-                }
-            });
+                        
+                        const isExpired = c.expiryTime > 0 && c.expiryTime <= Date.now();
+                        const isDataFull = c.totalGB > 0 && totalUsed >= c.totalGB;
 
-            for (let i = 0; i < cfg.activeSessions.length; i++) {
-                const session = cfg.activeSessions[i];
-                if (session.serverIdx !== sIdx) continue; 
-                if (session.notified) continue; 
+                        // ** AUTO DISABLE LOGIC **
+                        if ((isExpired || isDataFull) && c.enable === true) {
+                            console.log(`[AUTO-DISABLE] User ${c.email} (Expired: ${isExpired}, Full: ${isDataFull})`);
+                            settings.clients[i].enable = false; // Turn switch OFF
+                            inboundModified = true;
 
-                const clientData = serverClients.find(c => c.email === session.email);
-                if (clientData) {
-                    const isExpired = clientData.expiryTime > 0 && clientData.expiryTime <= Date.now();
-                    const isDataFull = clientData.totalGB > 0 && clientData.totalUsed >= clientData.totalGB;
-
-                    if (isExpired || isDataFull) {
-                        const reason = isExpired ? "📅 Plan Expired" : "📉 Data Limit Reached";
-                        try {
-                            await bot.sendMessage(session.chatId, `⚠️ **System Alert**\n\nUser: ${session.email}\nReason: ${reason}\n\nPlease renew your plan.`, { parse_mode: 'Markdown' });
-                            session.notified = true; 
-                            updated = true;
-                        } catch (e) {}
+                            // Notify User if linked
+                            const session = cfg.activeSessions.find(s => s.email === c.email);
+                            if (session && !session.notified) {
+                                const reason = isExpired ? "📅 Plan Expired" : "📉 Data Limit Reached";
+                                try {
+                                    await bot.sendMessage(session.chatId, `⚠️ **Service Paused**\n\nUser: ${session.email}\nReason: ${reason}\n\nYour service has been automatically disabled.`, { parse_mode: 'Markdown' });
+                                    session.notified = true; 
+                                    updated = true;
+                                } catch (e) {}
+                            }
+                        }
                     }
+                }
+
+                // If any client in this inbound was disabled, push update to server
+                if (inboundModified) {
+                    try {
+                        await axios.post(`${srv.url}/panel/api/inbounds/update/${inb.id}`, { ...inb, settings: JSON.stringify(settings) }, { headers: { 'Cookie': cookies } });
+                        console.log(`[AUTO-DISABLE] Updated Inbound ${inb.id} on ${srv.name}`);
+                    } catch(e) { console.log(`[ERROR] Failed to disable users on ${srv.name}`); }
                 }
             }
         } catch (e) {
@@ -593,7 +589,7 @@ async function handleResellerList(chatId, resIdx, page, msgIdToEdit = null) {
     }
 }
 
-// 2. Fix Reseller Details View (Uses UUID + Email Match)
+// 2. FIX RESELLER DETAILS (SMART SEARCH)
 async function showResellerUserDetails(chatId, resIdxStr, userIdxStr) {
     const config = loadConfig(); const resIdx = parseInt(resIdxStr); const userIdx = parseInt(userIdxStr);
     const reseller = config.resellers[resIdx]; const u = reseller.createdUsers[userIdx]; const server = config.servers[u.serverIdx];
@@ -602,27 +598,45 @@ async function showResellerUserDetails(chatId, resIdxStr, userIdxStr) {
         const cookies = await login(server);
         if(!cookies) return bot.sendMessage(chatId, "❌ Server Error");
         
-        // ** CRITICAL: Use /list endpoint to ensure clientStats is present **
         const inboundRes = await axios.get(`${server.url}/panel/api/inbounds/list`, { headers: { 'Cookie': cookies } });
         
         if(inboundRes.data && inboundRes.data.success) {
             const allInbounds = inboundRes.data.obj;
-            // Find specific inbound manually
-            const inboundObj = allInbounds.find(i => i.id == u.inboundId);
+            
+            // ** SMART SEARCH **
+            // 1. Try saved ID first
+            let inboundObj = allInbounds.find(i => i.id == u.inboundId);
+            let client = null;
 
             if(inboundObj) {
                 const settings = JSON.parse(inboundObj.settings);
-                const clientStats = inboundObj.clientStats || []; 
-                
-                // Match by Email
-                const client = settings.clients.find(c => c.email === u.email);
-                
-                if(client) {
-                     const totalUsed = getClientTraffic(client, clientStats);
-                     const daysLeft = client.expiryTime > 0 ? Math.ceil((client.expiryTime - Date.now()) / 86400000) : 0;
-                     const status = client.enable ? "🟢 Active" : "🔴 Disabled";
-                     const protocolName = inboundObj.protocol === 'vmess' ? 'VMess' : (inboundObj.protocol === 'vless' ? 'VLESS' : 'Shadowsocks');
-                     const msg = `👮 **User Management**
+                client = settings.clients.find(c => c.email === u.email);
+            }
+
+            // 2. If not found, SEARCH ALL INBOUNDS (Auto-Fix)
+            if(!client) {
+                console.log(`[FIX] Searching user ${u.email} in all inbounds...`);
+                for(const inb of allInbounds) {
+                    const settings = JSON.parse(inb.settings);
+                    const found = settings.clients.find(c => c.email === u.email);
+                    if(found) {
+                        client = found;
+                        inboundObj = inb;
+                        // Update config self-healing
+                        config.resellers[resIdx].createdUsers[userIdx].inboundId = inb.id;
+                        saveConfig(config);
+                        break;
+                    }
+                }
+            }
+
+            if(client && inboundObj) {
+                 const clientStats = inboundObj.clientStats || [];
+                 const totalUsed = getClientTraffic(client, clientStats);
+                 const daysLeft = client.expiryTime > 0 ? Math.ceil((client.expiryTime - Date.now()) / 86400000) : 0;
+                 const status = client.enable ? "🟢 Active" : "🔴 Disabled";
+                 const protocolName = inboundObj.protocol === 'vmess' ? 'VMess' : (inboundObj.protocol === 'vless' ? 'VLESS' : 'Shadowsocks');
+                 const msg = `👮 **User Management**
 -------------------------
 👤 Name: ${u.name}
 🖥 Server: ${server.name}
@@ -634,37 +648,52 @@ async function showResellerUserDetails(chatId, resIdxStr, userIdxStr) {
 📅 Expire: ${moment(client.expiryTime).format("YYYY-MM-DD")}
 
 ${createProgressBar(totalUsed, client.totalGB)}`;
-                     const btns = [[{ text: "⏳ RENEW", callback_data: `rshowren_${resIdx}_${userIdx}` }], [{ text: "🗑 DELETE", callback_data: `rdel_${resIdx}_${userIdx}` }]];
-                     await bot.sendMessage(chatId, msg, { parse_mode: 'Markdown', reply_markup: { inline_keyboard: btns } });
-                     return;
-                }
+                 const btns = [[{ text: "⏳ RENEW", callback_data: `rshowren_${resIdx}_${userIdx}` }], [{ text: "🗑 DELETE", callback_data: `rdel_${resIdx}_${userIdx}` }]];
+                 await bot.sendMessage(chatId, msg, { parse_mode: 'Markdown', reply_markup: { inline_keyboard: btns } });
+                 return;
             }
         }
-        bot.sendMessage(chatId, "❌ User not found or server error.");
+        bot.sendMessage(chatId, "❌ User not found (Deleted in Panel?)");
     } catch(e) { console.log(e); bot.sendMessage(chatId, "❌ Error."); }
 }
 
-// 3. Fix Admin User Details (Uses UUID + Email Match)
+// 3. FIX ADMIN DETAILS (SMART SEARCH)
 async function showAdminResellerUserDetails(chatId, resIdxStr, userIdxStr) {
     const config = loadConfig(); const resIdx = parseInt(resIdxStr); const userIdx = parseInt(userIdxStr);
     const reseller = config.resellers[resIdx]; const u = reseller.createdUsers[userIdx]; const server = config.servers[u.serverIdx];
     try {
         const cookies = await login(server); 
-        // Use /list for robust stats
         const inboundRes = await axios.get(`${server.url}/panel/api/inbounds/list`, { headers: { 'Cookie': cookies } });
-        
         const allInbounds = inboundRes.data.obj;
-        const inboundObj = allInbounds.find(i => i.id == u.inboundId);
         
-        if (inboundObj) {
-            const settings = JSON.parse(inboundObj.settings); 
-            const clientStats = inboundObj.clientStats || [];
-            const client = settings.clients.find(c => c.email === u.email);
+        // ** SMART SEARCH LOGIC **
+        let inboundObj = allInbounds.find(i => i.id == u.inboundId);
+        let client = null;
 
-            if (client) {
-                const totalUsed = getClientTraffic(client, clientStats);
-                const protocolName = inboundObj.protocol === 'vmess' ? 'VMess' : (inboundObj.protocol === 'vless' ? 'VLESS' : 'Shadowsocks');
-                const msg = `👮 **Admin User Control**
+        if(inboundObj) {
+            const settings = JSON.parse(inboundObj.settings);
+            client = settings.clients.find(c => c.email === u.email);
+        }
+
+        if(!client) {
+            for(const inb of allInbounds) {
+                const settings = JSON.parse(inb.settings);
+                const found = settings.clients.find(c => c.email === u.email);
+                if(found) {
+                    client = found;
+                    inboundObj = inb;
+                    config.resellers[resIdx].createdUsers[userIdx].inboundId = inb.id;
+                    saveConfig(config);
+                    break;
+                }
+            }
+        }
+        
+        if (client && inboundObj) {
+            const clientStats = inboundObj.clientStats || [];
+            const totalUsed = getClientTraffic(client, clientStats);
+            const protocolName = inboundObj.protocol === 'vmess' ? 'VMess' : (inboundObj.protocol === 'vless' ? 'VLESS' : 'Shadowsocks');
+            const msg = `👮 **Admin User Control**
 -------------------------
 👤 Name: ${u.name}
 🖥 Server: ${server.name}
@@ -676,10 +705,9 @@ async function showAdminResellerUserDetails(chatId, resIdxStr, userIdxStr) {
 📅 Expire: ${moment(client.expiryTime).format("YYYY-MM-DD")}
 
 ${createProgressBar(totalUsed, client.totalGB)}`;
-                const btns = [[{ text: "⏳ ADMIN RENEW", callback_data: `admren_${resIdx}_${userIdx}` }], [{ text: "🗑 ADMIN DELETE", callback_data: `admdel_${resIdx}_${userIdx}` }]];
-                bot.sendMessage(chatId, msg, { parse_mode: 'Markdown', reply_markup: { inline_keyboard: btns } });
-                return;
-            }
+            const btns = [[{ text: "⏳ ADMIN RENEW", callback_data: `admren_${resIdx}_${userIdx}` }], [{ text: "🗑 ADMIN DELETE", callback_data: `admdel_${resIdx}_${userIdx}` }]];
+            bot.sendMessage(chatId, msg, { parse_mode: 'Markdown', reply_markup: { inline_keyboard: btns } });
+            return;
         }
         bot.sendMessage(chatId, "❌ User Not Found");
     } catch(e) { console.log(e); bot.sendMessage(chatId, "Error"); }
@@ -693,16 +721,38 @@ async function renewResellerUser(chatId, resIdxStr, userIdxStr, price, days, lim
     const cookies = await login(srv); if(!cookies) return;
     try {
         try { await axios.post(`${srv.url}/panel/api/inbounds/resetClientTraffic/${userRec.inboundId}/${userRec.email}`, {}, { headers: { 'Cookie': cookies } }); } catch(e) {}
-        const res = await axios.get(`${srv.url}/panel/api/inbounds/get/${userRec.inboundId}`, { headers: { 'Cookie': cookies } });
-        const inbound = res.data.obj; const settings = JSON.parse(inbound.settings);
+        
+        // Fetch fresh list to handle potential ID changes
+        const listRes = await axios.get(`${srv.url}/panel/api/inbounds/list`, { headers: { 'Cookie': cookies } });
+        const allInbounds = listRes.data.obj;
+        let inbound = allInbounds.find(i => i.id == userRec.inboundId);
+        
+        // Smart Search if ID changed
+        if (!inbound || !JSON.parse(inbound.settings).clients.find(c => c.email === userRec.email)) {
+             for(const inb of allInbounds) {
+                 if(JSON.parse(inb.settings).clients.find(c => c.email === userRec.email)) {
+                     inbound = inb;
+                     userRec.inboundId = inb.id; // Self heal
+                     break;
+                 }
+             }
+        }
+        
+        if(!inbound) return bot.sendMessage(chatId, "❌ User not found in Panel.");
+
+        const settings = JSON.parse(inbound.settings);
         const clientIdx = settings.clients.findIndex(c => c.email === userRec.email);
         const client = settings.clients[clientIdx];
-        client.expiryTime = Date.now() + (days * 86400000); client.enable = true; client.up = 0; client.down = 0;
-        if(limitGB) client.totalGB = limitGB * 1024 * 1024 * 1024;
-        settings.clients[clientIdx] = client;
-        await axios.post(`${srv.url}/panel/api/inbounds/update/${userRec.inboundId}`, { ...inbound, settings: JSON.stringify(settings) }, { headers: { 'Cookie': cookies } });
-        cfg.resellers[resIdx].balance -= price; 
         
+        client.expiryTime = Date.now() + (days * 86400000); 
+        client.enable = true; // Auto re-enable
+        client.up = 0; client.down = 0;
+        if(limitGB) client.totalGB = limitGB * 1024 * 1024 * 1024;
+        
+        settings.clients[clientIdx] = client;
+        await axios.post(`${srv.url}/panel/api/inbounds/update/${inbound.id}`, { ...inbound, settings: JSON.stringify(settings) }, { headers: { 'Cookie': cookies } });
+        
+        cfg.resellers[resIdx].balance -= price; 
         const session = cfg.activeSessions.find(s => s.email === userRec.email);
         if(session) session.notified = false;
 
@@ -718,11 +768,23 @@ async function deleteResellerUser(chatId, resIdxStr, userIdxStr, isAdmin = false
     const srv = cfg.servers[userRec.serverIdx];
     const cookies = await login(srv); if(!cookies) return;
     try {
-        const res = await axios.get(`${srv.url}/panel/api/inbounds/get/${userRec.inboundId}`, { headers: { 'Cookie': cookies } });
-        const inbound = res.data.obj; let settings = JSON.parse(inbound.settings);
-        const initialCount = settings.clients.length;
-        settings.clients = settings.clients.filter(c => c.email !== userRec.email);
-        if(settings.clients.length < initialCount) await axios.post(`${srv.url}/panel/api/inbounds/update/${userRec.inboundId}`, { ...inbound, settings: JSON.stringify(settings) }, { headers: { 'Cookie': cookies } });
+        const listRes = await axios.get(`${srv.url}/panel/api/inbounds/list`, { headers: { 'Cookie': cookies } });
+        const allInbounds = listRes.data.obj;
+        let inbound = allInbounds.find(i => i.id == userRec.inboundId);
+        
+        if (!inbound || !JSON.parse(inbound.settings).clients.find(c => c.email === userRec.email)) {
+             for(const inb of allInbounds) {
+                 if(JSON.parse(inb.settings).clients.find(c => c.email === userRec.email)) {
+                     inbound = inb; break;
+                 }
+             }
+        }
+
+        if (inbound) {
+            let settings = JSON.parse(inbound.settings);
+            settings.clients = settings.clients.filter(c => c.email !== userRec.email);
+            await axios.post(`${srv.url}/panel/api/inbounds/update/${inbound.id}`, { ...inbound, settings: JSON.stringify(settings) }, { headers: { 'Cookie': cookies } });
+        }
         
         cfg.resellers[resIdx].createdUsers.splice(userIdx, 1);
         cfg.activeSessions = cfg.activeSessions.filter(s => s.email !== userRec.email);
@@ -866,5 +928,5 @@ pm2 save
 pm2 startup
 
 IP=$(curl -s ifconfig.me)
-echo -e "${GREEN}✅ UPDATE COMPLETE! (UUID Match Added)${NC}"
+echo -e "${GREEN}✅ UPDATE COMPLETE! (Auto Disable + Smart Search)${NC}"
 echo -e "${GREEN}Panel: http://$IP:3000${NC}"
