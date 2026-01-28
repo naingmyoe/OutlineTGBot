@@ -1,10 +1,9 @@
 #!/bin/bash
 
-# 3xbot Ultimate Installer (v9.1 - Traffic Calculation Fix)
+# 3xbot Ultimate Installer (v9.2 - Traffic Stats Fix)
 # Updates:
-# 1. FIXED: Used Traffic calculation matches 3x-ui "All Traffic" (Up + Down).
-# 2. INCLUDED: Protocol Selection (VLESS/VMess/SS).
-# 3. INCLUDED: All previous fixes.
+# 1. FIXED: Traffic fetch method (Now uses 'clientStats' object).
+# 2. FIXED: Solves the "0 B" issue by merging live stats with user settings.
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -13,7 +12,7 @@ CYAN='\033[0;36m'
 NC='\033[0m'
 
 echo -e "${CYAN}=====================================================${NC}"
-echo -e "${CYAN}    3xbot Installer v9.1 (Traffic Fix Added)         ${NC}"
+echo -e "${CYAN}    3xbot Installer v9.2 (Real Traffic Fix)          ${NC}"
 echo -e "${CYAN}=====================================================${NC}"
 
 # Check Root
@@ -37,7 +36,7 @@ cd "$PROJECT_DIR"
 cat > package.json <<EOF
 {
   "name": "3xbot-manager",
-  "version": "9.1.0",
+  "version": "9.2.0",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
@@ -92,7 +91,7 @@ if [ ! -f config.json ]; then
 EOF
 fi
 
-# 3. Create index.js (UPDATED TRAFFIC LOGIC)
+# 3. Create index.js (UPDATED: clientStats Logic)
 cat > index.js <<'EOF'
 const express = require('express');
 const bodyParser = require('body-parser');
@@ -463,6 +462,7 @@ function startBot(token) {
 
 // --- SHARED FUNCTIONS ---
 
+// 1. Monitor Expiration with Stats Fix
 async function monitorExpirations() {
     const cfg = loadConfig();
     console.log("⏰ Checking expirations...");
@@ -482,9 +482,27 @@ async function monitorExpirations() {
 
             const inbounds = res.data.obj;
             let serverClients = [];
+
+            // Updated Logic: Merge Settings with clientStats
             inbounds.forEach(inb => {
                 const settings = JSON.parse(inb.settings);
-                if (settings.clients) serverClients.push(...settings.clients);
+                const clientStats = inb.clientStats || []; // Capture live stats
+
+                if (settings.clients) {
+                    settings.clients.forEach(c => {
+                        // Find matching stat for this client email
+                        const stat = clientStats.find(s => s.email === c.email);
+                        const liveUp = stat ? stat.up : (c.up || 0);
+                        const liveDown = stat ? stat.down : (c.down || 0);
+                        
+                        // Push merged object
+                        serverClients.push({
+                            ...c,
+                            up: liveUp,
+                            down: liveDown
+                        });
+                    });
+                }
             });
 
             for (let i = 0; i < cfg.activeSessions.length; i++) {
@@ -494,7 +512,7 @@ async function monitorExpirations() {
 
                 const clientData = serverClients.find(c => c.email === session.email);
                 if (clientData) {
-                    const totalUsed = Number(clientData.up || 0) + Number(clientData.down || 0);
+                    const totalUsed = Number(clientData.up) + Number(clientData.down);
                     const isExpired = clientData.expiryTime > 0 && clientData.expiryTime <= Date.now();
                     const isDataFull = clientData.totalGB > 0 && totalUsed >= clientData.totalGB;
 
@@ -566,6 +584,7 @@ async function handleResellerList(chatId, resIdx, page, msgIdToEdit = null) {
     }
 }
 
+// 2. Fix Reseller Details View (Uses clientStats)
 async function showResellerUserDetails(chatId, resIdxStr, userIdxStr) {
     const config = loadConfig(); const resIdx = parseInt(resIdxStr); const userIdx = parseInt(userIdxStr);
     const reseller = config.resellers[resIdx]; const u = reseller.createdUsers[userIdx]; const server = config.servers[u.serverIdx];
@@ -577,10 +596,16 @@ async function showResellerUserDetails(chatId, resIdxStr, userIdxStr) {
         if(inboundRes.data && inboundRes.data.success) {
             const inboundObj = inboundRes.data.obj;
             const settings = JSON.parse(inboundObj.settings);
+            const clientStats = inboundObj.clientStats || []; // Grab Stats
+
             const client = settings.clients.find(c => c.email === u.email);
             if(client) {
-                 // ** FIX: Explicitly parse as Numbers and sum Up + Down **
-                 const totalUsed = Number(client.up||0) + Number(client.down||0); 
+                 // ** FIX: Look for live stats **
+                 const stat = clientStats.find(s => s.email === u.email);
+                 const liveUp = stat ? Number(stat.up) : Number(client.up||0);
+                 const liveDown = stat ? Number(stat.down) : Number(client.down||0);
+                 const totalUsed = liveUp + liveDown;
+
                  const daysLeft = client.expiryTime > 0 ? Math.ceil((client.expiryTime - Date.now()) / 86400000) : 0;
                  const usedStr = formatBytes(totalUsed); 
                  const freeStr = formatBytes(client.totalGB - totalUsed);
@@ -594,7 +619,7 @@ async function showResellerUserDetails(chatId, resIdxStr, userIdxStr) {
 🔌 Protocol: ${protocolName}
 📡 Status: ${status}
 ⏳ Remaining: ${daysLeft} Days
-📊 Used (All Traffic): ${usedStr}
+📊 Used: ${usedStr}
 🎁 Free: ${freeStr}
 📅 Expire: ${expStr}
 
@@ -606,17 +631,25 @@ ${createProgressBar(totalUsed, client.totalGB)}`;
     } catch(e) { bot.sendMessage(chatId, "❌ Error."); }
 }
 
+// 3. Fix Admin User Details (Uses clientStats)
 async function showAdminResellerUserDetails(chatId, resIdxStr, userIdxStr) {
     const config = loadConfig(); const resIdx = parseInt(resIdxStr); const userIdx = parseInt(userIdxStr);
     const reseller = config.resellers[resIdx]; const u = reseller.createdUsers[userIdx]; const server = config.servers[u.serverIdx];
     try {
         const cookies = await login(server); const inboundRes = await axios.get(`${server.url}/panel/api/inbounds/get/${u.inboundId}`, { headers: { 'Cookie': cookies } });
         const inboundObj = inboundRes.data.obj;
-        const settings = JSON.parse(inboundObj.settings); const client = settings.clients.find(c => c.email === u.email);
-        const protocolName = inboundObj.protocol === 'vmess' ? 'VMess' : (inboundObj.protocol === 'vless' ? 'VLESS' : 'Shadowsocks');
+        const settings = JSON.parse(inboundObj.settings); 
+        const clientStats = inboundObj.clientStats || [];
+
+        const client = settings.clients.find(c => c.email === u.email);
         
-        // ** FIX: Explicitly parse as Numbers and sum Up + Down **
-        const totalUsed = Number(client.up||0) + Number(client.down||0);
+        // ** FIX: Traffic calculation **
+        const stat = clientStats.find(s => s.email === u.email);
+        const liveUp = stat ? Number(stat.up) : Number(client.up||0);
+        const liveDown = stat ? Number(stat.down) : Number(client.down||0);
+        const totalUsed = liveUp + liveDown;
+        
+        const protocolName = inboundObj.protocol === 'vmess' ? 'VMess' : (inboundObj.protocol === 'vless' ? 'VLESS' : 'Shadowsocks');
         
         const msg = `👮 **Admin User Control**
 -------------------------
@@ -625,7 +658,7 @@ async function showAdminResellerUserDetails(chatId, resIdxStr, userIdxStr) {
 🔌 Protocol: ${protocolName}
 📡 Status: ${client.enable?'🟢 Active':'🔴 Disabled'}
 ⏳ Left: ${Math.ceil((client.expiryTime-Date.now())/86400000)} Days
-📊 Used (All Traffic): ${formatBytes(totalUsed)}
+📊 Used: ${formatBytes(totalUsed)}
 🎁 Free: ${formatBytes(client.totalGB - totalUsed)}
 📅 Expire: ${moment(client.expiryTime).format("YYYY-MM-DD")}
 
@@ -746,6 +779,8 @@ function handleAdminResellerUserList(chatId, resIdx, page, msgIdToEdit = null) {
     if (msgIdToEdit) bot.editMessageText(text, { chat_id: chatId, message_id: msgIdToEdit, parse_mode: 'Markdown', reply_markup: { inline_keyboard: btns } });
     else bot.sendMessage(chatId, text, { parse_mode: 'Markdown', reply_markup: { inline_keyboard: btns } });
 }
+
+// 4. Fix Server User List (Uses clientStats)
 async function fetchAndShowServerUsers(chatId, srvIdx, page = 0, msgIdToEdit = null) {
     const config = loadConfig();
     const server = config.servers[srvIdx];
@@ -758,7 +793,23 @@ async function fetchAndShowServerUsers(chatId, srvIdx, page = 0, msgIdToEdit = n
             let allClients = [];
             res.data.obj.forEach(inb => {
                 const settings = JSON.parse(inb.settings);
-                if(settings.clients) settings.clients.forEach(c => allClients.push({ ...c, inboundTag: inb.tag, inboundId: inb.id }));
+                const clientStats = inb.clientStats || []; // Capture stats
+                
+                if(settings.clients) {
+                    settings.clients.forEach(c => {
+                        const stat = clientStats.find(s => s.email === c.email);
+                        const liveUp = stat ? Number(stat.up) : Number(c.up||0);
+                        const liveDown = stat ? Number(stat.down) : Number(c.down||0);
+                        
+                        allClients.push({ 
+                            ...c, 
+                            up: liveUp,
+                            down: liveDown,
+                            inboundTag: inb.tag, 
+                            inboundId: inb.id 
+                        });
+                    });
+                }
             });
             adminSession[chatId] = { type: 'SERVER_VIEW', clients: allClients, srvName: server.name, srvIdx: srvIdx };
             await renderServerUserPage(chatId, page, msgIdToEdit);
@@ -776,8 +827,7 @@ async function renderServerUserPage(chatId, page, msgIdToEdit = null) {
     const currentUsers = session.clients.slice(start, end);
     let msg = `🖥 **Server:** ${session.srvName}\n👥 **Total Users:** ${totalUsers}\n📄 **Page:** ${page+1}/${totalPages || 1}\n\n`;
     currentUsers.forEach((c, i) => {
-        // ** FIX: Explicitly parse as Numbers and sum Up + Down **
-        const totalUsed = Number(c.up||0) + Number(c.down||0);
+        const totalUsed = Number(c.up) + Number(c.down);
         const daysLeft = c.expiryTime > 0 ? Math.ceil((c.expiryTime - Date.now()) / 86400000) : 0;
         const icon = c.enable ? "🟢" : "🔴";
         msg += `${start+i+1}. ${icon} **${c.email||'No Email'}**\n   📊 ${formatBytes(totalUsed)} | ⏳ ${daysLeft} Days | 📅 ${moment(c.expiryTime).format("YYYY-MM-DD")}\n\n`;
@@ -804,5 +854,5 @@ pm2 save
 pm2 startup
 
 IP=$(curl -s ifconfig.me)
-echo -e "${GREEN}✅ UPDATE COMPLETE! (Traffic Fixed)${NC}"
+echo -e "${GREEN}✅ UPDATE COMPLETE! (Real Traffic Fixed)${NC}"
 echo -e "${GREEN}Panel: http://$IP:3000${NC}"
