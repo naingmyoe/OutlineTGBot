@@ -1,10 +1,10 @@
 #!/bin/bash
 
-# 3xbot Ultimate Installer (v9.6 - Auto Sync & Force Off Fix)
+# 3xbot Ultimate Installer (v9.7 - Auto Retry & Stable Network)
 # Updates:
-# 1. FIXED: Ghost Users -> Automatically removes users from bot if missing in panel.
-# 2. FIXED: Auto-Disable -> Forces Panel Switch OFF for negative days (-1).
-# 3. IMPROVED: Reseller List now syncs with Panel in real-time.
+# 1. ADDED: "Smart Retry System" - Retries 3 times if connection fails.
+# 2. FIXED: Resumes monitoring automatically after network recovery.
+# 3. OPTIMIZED: Uses Sequential Loop instead of fixed Interval to prevent overlap.
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -13,7 +13,7 @@ CYAN='\033[0;36m'
 NC='\033[0m'
 
 echo -e "${CYAN}=====================================================${NC}"
-echo -e "${CYAN}    3xbot Installer v9.6 (Sync & Auto-Off Fix)       ${NC}"
+echo -e "${CYAN}    3xbot Installer v9.7 (Auto Retry System)         ${NC}"
 echo -e "${CYAN}=====================================================${NC}"
 
 # Check Root
@@ -37,7 +37,7 @@ cd "$PROJECT_DIR"
 cat > package.json <<EOF
 {
   "name": "3xbot-manager",
-  "version": "9.6.0",
+  "version": "9.7.0",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
@@ -92,7 +92,7 @@ if [ ! -f config.json ]; then
 EOF
 fi
 
-# 3. Create index.js (UPDATED: Sync Logic & Force Off)
+# 3. Create index.js (UPDATED: Retry Logic)
 cat > index.js <<'EOF'
 const express = require('express');
 const bodyParser = require('body-parser');
@@ -112,6 +112,11 @@ const configPath = path.join(__dirname, 'config.json');
 app.use(cors());
 app.use(bodyParser.json());
 app.use(express.static('public'));
+
+// Axios Instance with Timeout to prevent hanging
+const axiosInstance = axios.create({
+    timeout: 15000 // 15 Seconds timeout
+});
 
 // State Management
 let pendingOrders = {}; 
@@ -146,8 +151,11 @@ function createProgressBar(current, total, size = 10) {
     const empty = size - filled;
     return '▓'.repeat(filled) + '░'.repeat(empty) + ` ${Math.round(percent * 100)}%`;
 }
+function sleep(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
+}
 
-// --- CORE: TRAFFIC FINDER ---
+// --- TRAFFIC FINDER ---
 function getClientTraffic(client, clientStats) {
     if (clientStats && Array.isArray(clientStats)) {
         const stat = clientStats.find(s => 
@@ -160,14 +168,12 @@ function getClientTraffic(client, clientStats) {
     return Number(client.up || 0) + Number(client.down || 0);
 }
 
-// --- CORE: SYNC & CLEAN USERS ---
-// This function checks local users against the panel and removes ghosts
+// --- CORE: SYNC USERS ---
 async function syncResellerUsers(resIdx) {
     let cfg = loadConfig();
     const reseller = cfg.resellers[resIdx];
     if (!reseller || !reseller.createdUsers || reseller.createdUsers.length === 0) return;
 
-    // Group users by server to minimize login requests
     const usersByServer = {};
     reseller.createdUsers.forEach((u, idx) => {
         if (!usersByServer[u.serverIdx]) usersByServer[u.serverIdx] = [];
@@ -180,54 +186,28 @@ async function syncResellerUsers(resIdx) {
     for (const srvIdx in usersByServer) {
         const server = cfg.servers[srvIdx];
         const localUsers = usersByServer[srvIdx];
-
         try {
             const cookies = await login(server);
-            if (!cookies) {
-                // If server is down, keep users to be safe
-                validUsers.push(...localUsers);
-                continue;
-            }
-
-            const res = await axios.get(`${server.url}/panel/api/inbounds/list`, { headers: { 'Cookie': cookies } });
+            if (!cookies) { validUsers.push(...localUsers); continue; }
+            const res = await axiosInstance.get(`${server.url}/panel/api/inbounds/list`, { headers: { 'Cookie': cookies } });
             if (res.data && res.data.success) {
-                const allInbounds = res.data.obj;
                 const allEmails = new Set();
-                
-                // Collect ALL emails from panel
-                allInbounds.forEach(inb => {
+                res.data.obj.forEach(inb => {
                     const settings = JSON.parse(inb.settings);
-                    if (settings.clients) {
-                        settings.clients.forEach(c => allEmails.add(c.email));
-                    }
+                    if (settings.clients) settings.clients.forEach(c => allEmails.add(c.email));
                 });
-
-                // Filter: Keep only if email exists in panel
                 localUsers.forEach(u => {
-                    if (allEmails.has(u.email)) {
-                        validUsers.push(u);
-                    } else {
-                        console.log(`[SYNC] Removing ghost user: ${u.email}`);
-                        hasChanges = true;
-                    }
+                    if (allEmails.has(u.email)) validUsers.push(u);
+                    else { console.log(`[SYNC] Removing ghost user: ${u.email}`); hasChanges = true; }
                 });
-            } else {
-                 validUsers.push(...localUsers);
-            }
-        } catch (e) {
-            console.log(`[SYNC ERROR] Server ${srvIdx}: ${e.message}`);
-            validUsers.push(...localUsers);
-        }
+            } else validUsers.push(...localUsers);
+        } catch (e) { validUsers.push(...localUsers); }
     }
-
     if (hasChanges) {
-        // Sort valid users to maintain order or just save
-        // We need to reconstruct the reseller's user list
         cfg.resellers[resIdx].createdUsers = validUsers;
         saveConfig(cfg);
     }
 }
-
 
 // --- WEB API ---
 app.get('/api/config', (req, res) => res.json(loadConfig()));
@@ -247,10 +227,8 @@ function startBot(token) {
     bot = new TelegramBot(token, { polling: true });
     console.log("✅ Telegram Bot Started...");
 
-    // Monitoring Loop (Run every 15 Minutes)
-    setInterval(() => {
-        monitorExpirations();
-    }, 15 * 60 * 1000); 
+    // ** NEW MONITORING SYSTEM (LOOP with RETRY) **
+    startMonitoringLoop();
 
     const isAdmin = (chatId) => {
         const cfg = loadConfig();
@@ -310,7 +288,6 @@ function startBot(token) {
         }
         if (text === txt.adminBtn && isAdmin(chatId)) { sendAdminMenu(chatId); return; }
 
-        // --- SLIP HANDLING ---
         if (msg.photo && pendingOrders[chatId]) {
             const order = pendingOrders[chatId];
             const plan = currentCfg.plans[order.planIdx];
@@ -320,11 +297,9 @@ function startBot(token) {
             if(order.proto === 'ss') pName = "Shadowsocks";
 
             bot.sendMessage(chatId, "⏳ **Slip Received!** Waiting approval...", {parse_mode: 'Markdown'});
-            
             const uniqueAdmins = new Set();
             if(currentCfg.telegram.adminId) uniqueAdmins.add(String(currentCfg.telegram.adminId));
             if(currentCfg.telegram.admins) currentCfg.telegram.admins.forEach(a => uniqueAdmins.add(String(a.id)));
-
             const adminMsgLog = [];
             const caption = `🛒 **New Order**
 👤 Name: ${msg.from.first_name} ${msg.from.last_name || ''}
@@ -347,7 +322,6 @@ function startBot(token) {
             pendingOrders[chatId].adminMsgs = adminMsgLog; 
         }
 
-        // --- ADMIN / RESELLER SESSIONS ---
         if (isAdmin(chatId)) {
             if (text === "🔙 Back to Main Menu") { delete adminSession[chatId]; sendMainMenu(chatId); return; }
             if (text === "📢 Broadcast Message") { adminSession[chatId] = { state: 'WAIT_BROADCAST' }; return bot.sendMessage(chatId, "📢 Send message."); }
@@ -416,9 +390,7 @@ function startBot(token) {
              if (pCfg.vless) protoBtns.push([{ text: "VLESS", callback_data: `${protoPrefix}_${srvIdx}_vless` }]);
              if (pCfg.vmess) protoBtns.push([{ text: "VMess", callback_data: `${protoPrefix}_${srvIdx}_vmess` }]);
              if (pCfg.ss) protoBtns.push([{ text: "Shadowsocks", callback_data: `${protoPrefix}_${srvIdx}_ss` }]);
-
              if(protoBtns.length === 0) return bot.answerCallbackQuery(query.id, { text: "⚠️ No protocols enabled by Admin.", show_alert: true });
-
              bot.editMessageText("Select Protocol:", { chat_id: chatId, message_id: query.message.message_id, reply_markup: { inline_keyboard: protoBtns }});
         }
 
@@ -439,7 +411,6 @@ function startBot(token) {
              fresh.trialUsers.push(chatId); saveConfig(fresh);
              await generateAndSendKey(chatId, fresh.servers[srvIdx], {name: "Trial", limitGB: fresh.trial.limitGB, days: fresh.trial.days}, proto, true);
         }
-
         if (data.startsWith('plan_')) {
              const [_, srvIdx, proto, planIdx] = data.split('_');
              pendingOrders[chatId] = { srvIdx, proto, planIdx };
@@ -448,7 +419,6 @@ function startBot(token) {
 ⏳ Days: ${plan.days} Days
 📡 GB: ${plan.limitGB} GB
 💰 Price: ${plan.price} MMK
-
 ❗️ **Please upload payment slip.**`;
              bot.sendMessage(chatId, msgText, {parse_mode: 'Markdown'});
         }
@@ -459,7 +429,6 @@ function startBot(token) {
             bot.deleteMessage(chatId, query.message.message_id);
             bot.sendMessage(chatId, "👤 **Enter Name for User:**", {parse_mode: 'Markdown'});
         }
-
         if (data.startsWith('app_')) {
             const [_, uId, srv, pCode, pIdx] = data.split('_');
             const order = pendingOrders[uId];
@@ -482,7 +451,6 @@ function startBot(token) {
                 delete pendingOrders[uId];
             }
         }
-
         if (data.startsWith('admsrv_')) { await fetchAndShowServerUsers(chatId, parseInt(data.split('_')[1]), 0, query.message.message_id); }
         if (data.startsWith('srvpage_')) { 
             if (!adminSession[chatId] || adminSession[chatId].type !== 'SERVER_VIEW') {
@@ -490,7 +458,6 @@ function startBot(token) {
             }
             await renderServerUserPage(chatId, parseInt(data.split('_')[1]), query.message.message_id); 
         }
-
         if (data.startsWith('admviewres_')) { await handleAdminResellerUserList(chatId, parseInt(data.split('_')[1]), 0); }
         if (data.startsWith('admu_page_')) { const [_, resIdx, page] = data.split('_'); await handleAdminResellerUserList(chatId, parseInt(resIdx), parseInt(page), query.message.message_id); }
         if (data.startsWith('admshowu_')) { const [_, resIdx, userIdx] = data.split('_'); await showAdminResellerUserDetails(chatId, resIdx, userIdx); }
@@ -514,7 +481,6 @@ function startBot(token) {
             adminSession[chatId] = { state: 'WAIT_TOPUP_AMOUNT', resIdx: resIdx };
             bot.editMessageText(`💰 TopUp for **${currentCfg.resellers[resIdx].username}**\nEnter Amount:`, { chat_id: chatId, message_id: query.message.message_id });
         }
-        
         if (data.startsWith('rpage_')) {
             const [_, resIdxStr, pageStr] = data.split('_');
             await handleResellerList(chatId, parseInt(resIdxStr), parseInt(pageStr), query.message.message_id);
@@ -545,79 +511,83 @@ function startBot(token) {
 
 // --- SHARED FUNCTIONS ---
 
-// 1. MONITOR EXPIRATION + FORCE OFF (FIXED)
+// 1. MONITOR EXPIRATION + AUTO RETRY (THE NEW LOOP)
+async function startMonitoringLoop() {
+    const checkInterval = 5 * 60 * 1000; // 5 Minutes
+    
+    while (true) {
+        console.log("⏰ [AUTO-CHECK] Starting monitoring cycle...");
+        await monitorExpirations();
+        console.log(`💤 [WAIT] Waiting ${checkInterval/1000} seconds...`);
+        await sleep(checkInterval);
+    }
+}
+
 async function monitorExpirations() {
     const cfg = loadConfig();
-    console.log("⏰ [AUTO-CHECK] Checking users for expiration/data limits...");
-    
-    if (!cfg.activeSessions || cfg.activeSessions.length === 0) return;
-
     let updated = false;
 
     for (let sIdx = 0; sIdx < cfg.servers.length; sIdx++) {
         const srv = cfg.servers[sIdx];
-        try {
-            const cookies = await login(srv);
-            if (!cookies) continue;
-            
-            // Fetch fresh list
-            const res = await axios.get(`${srv.url}/panel/api/inbounds/list`, { headers: { 'Cookie': cookies } });
-            if (!res.data || !res.data.success) continue;
+        
+        // ** RETRY LOGIC (3 Times) **
+        let attempts = 0;
+        let success = false;
+        
+        while(attempts < 3 && !success) {
+            try {
+                const cookies = await login(srv);
+                if (!cookies) throw new Error("Login Failed");
 
-            const inbounds = res.data.obj;
+                const res = await axiosInstance.get(`${srv.url}/panel/api/inbounds/list`, { headers: { 'Cookie': cookies } });
+                if (!res.data || !res.data.success) throw new Error("Fetch Failed");
 
-            for (const inb of inbounds) {
-                const settings = JSON.parse(inb.settings);
-                const clientStats = inb.clientStats || [];
-                let modified = false;
+                const inbounds = res.data.obj;
+                for (const inb of inbounds) {
+                    const settings = JSON.parse(inb.settings);
+                    const clientStats = inb.clientStats || [];
+                    let modified = false;
 
-                if (settings.clients) {
-                    for (let i = 0; i < settings.clients.length; i++) {
-                        const c = settings.clients[i];
-                        const totalUsed = getClientTraffic(c, clientStats);
-                        
-                        // ** CRITICAL FIX: Check if Time is in Past **
-                        const isExpired = c.expiryTime > 0 && c.expiryTime <= Date.now();
-                        const isDataFull = c.totalGB > 0 && totalUsed >= c.totalGB;
+                    if (settings.clients) {
+                        for (let i = 0; i < settings.clients.length; i++) {
+                            const c = settings.clients[i];
+                            const totalUsed = getClientTraffic(c, clientStats);
+                            
+                            const isExpired = c.expiryTime > 0 && c.expiryTime <= Date.now();
+                            const isDataFull = c.totalGB > 0 && totalUsed >= c.totalGB;
 
-                        // ** FORCE OFF LOGIC **
-                        if ((isExpired || isDataFull) && c.enable === true) {
-                            console.log(`[ACTION] Disabling ${c.email} (Expired: ${isExpired}, Full: ${isDataFull})`);
-                            settings.clients[i].enable = false; // Set switch OFF
-                            modified = true;
+                            if ((isExpired || isDataFull) && c.enable === true) {
+                                console.log(`[ACTION] Disabling ${c.email}`);
+                                settings.clients[i].enable = false; 
+                                modified = true;
 
-                            const session = cfg.activeSessions.find(s => s.email === c.email);
-                            if (session && !session.notified) {
-                                const reason = isExpired ? "📅 Plan Expired" : "📉 Data Limit Reached";
-                                try {
-                                    await bot.sendMessage(session.chatId, `⚠️ **Service Paused**\n\nUser: ${session.email}\nReason: ${reason}`, { parse_mode: 'Markdown' });
-                                    session.notified = true; 
-                                    updated = true;
-                                } catch (e) {}
+                                const session = cfg.activeSessions.find(s => s.email === c.email);
+                                if (session && !session.notified) {
+                                    const reason = isExpired ? "📅 Plan Expired" : "📉 Data Limit Reached";
+                                    try {
+                                        await bot.sendMessage(session.chatId, `⚠️ **Service Paused**\n\nUser: ${session.email}\nReason: ${reason}`, { parse_mode: 'Markdown' });
+                                        session.notified = true; 
+                                        updated = true;
+                                    } catch (e) {}
+                                }
                             }
                         }
                     }
-                }
 
-                // ** IMMEDIATE UPDATE **
-                if (modified) {
-                    try {
-                        // Send entire inbound object back with updated settings
-                        await axios.post(`${srv.url}/panel/api/inbounds/update/${inb.id}`, { 
-                            ...inb, 
-                            settings: JSON.stringify(settings) 
+                    if (modified) {
+                        await axiosInstance.post(`${srv.url}/panel/api/inbounds/update/${inb.id}`, { 
+                            ...inb, settings: JSON.stringify(settings) 
                         }, { headers: { 'Cookie': cookies } });
-                        console.log(`✅ [SUCCESS] Disabled users in Inbound ${inb.id}`);
-                    } catch(e) { 
-                        console.log(`❌ [FAIL] Could not update Inbound ${inb.id}: ${e.message}`); 
                     }
                 }
+                success = true; // Mark as success to exit retry loop
+            } catch (e) {
+                attempts++;
+                console.log(`⚠️ [RETRY] Server ${srv.name} failed (${attempts}/3). Error: ${e.message}`);
+                if (attempts < 3) await sleep(10000); // Wait 10s before retry
             }
-        } catch (e) {
-            console.log(`Monitor Error on ${srv.name}: ${e.message}`);
         }
     }
-    
     if (updated) saveConfig(cfg);
 }
 
@@ -635,19 +605,11 @@ function handleResellerCreate(chatId) {
 }
 
 async function handleResellerList(chatId, resIdx, page, msgIdToEdit = null) {
-    // ** AUTO SYNC: Clean Ghost Users First **
     await syncResellerUsers(resIdx);
-    
     const config = loadConfig();
     const reseller = config.resellers[resIdx];
-    
-    if (!reseller) {
-        if(msgIdToEdit) bot.deleteMessage(chatId, msgIdToEdit);
-        return bot.sendMessage(chatId, "⚠️ Session Expired. Please login again.");
-    }
-    if (!reseller.createdUsers || reseller.createdUsers.length === 0) {
-        return bot.sendMessage(chatId, "⚠️ No users created yet.");
-    }
+    if (!reseller) return bot.sendMessage(chatId, "⚠️ Session Expired.");
+    if (!reseller.createdUsers || reseller.createdUsers.length === 0) return bot.sendMessage(chatId, "⚠️ No users.");
 
     const pageSize = 10; 
     const totalUsers = reseller.createdUsers.length; 
@@ -660,11 +622,8 @@ async function handleResellerList(chatId, resIdx, page, msgIdToEdit = null) {
     if (page < totalPages - 1) navRow.push({ text: "➡️", callback_data: `rpage_${resIdx}_${page + 1}` });
     if (navRow.length > 0) btns.push(navRow);
     const text = `👥 **User Management (${page + 1}/${totalPages})**`;
-    if (msgIdToEdit) {
-        try { await bot.editMessageText(text, { chat_id: chatId, message_id: msgIdToEdit, parse_mode: 'Markdown', reply_markup: { inline_keyboard: btns } }); } catch(e) {}
-    } else {
-        bot.sendMessage(chatId, text, { parse_mode: 'Markdown', reply_markup: { inline_keyboard: btns } });
-    }
+    if (msgIdToEdit) try { await bot.editMessageText(text, { chat_id: chatId, message_id: msgIdToEdit, parse_mode: 'Markdown', reply_markup: { inline_keyboard: btns } }); } catch(e) {}
+    else bot.sendMessage(chatId, text, { parse_mode: 'Markdown', reply_markup: { inline_keyboard: btns } });
 }
 
 async function showResellerUserDetails(chatId, resIdxStr, userIdxStr) {
@@ -672,15 +631,12 @@ async function showResellerUserDetails(chatId, resIdxStr, userIdxStr) {
     const reseller = config.resellers[resIdx]; const u = reseller.createdUsers[userIdx]; const server = config.servers[u.serverIdx];
     bot.sendMessage(chatId, "🔄 Details...", { parse_mode: 'Markdown' });
 
-    // ** GLOBAL SEARCH CALL **
     const result = await findUserInPanelGlobal(server, u.email);
-
     if (result && result.found) {
          if (config.resellers[resIdx].createdUsers[userIdx].inboundId != result.inbound.id) {
              config.resellers[resIdx].createdUsers[userIdx].inboundId = result.inbound.id;
              saveConfig(config);
          }
-
          const client = result.client;
          const inboundObj = result.inbound;
          const totalUsed = getClientTraffic(client, result.clientStats);
@@ -702,24 +658,22 @@ ${createProgressBar(totalUsed, client.totalGB)}`;
          const btns = [[{ text: "⏳ RENEW", callback_data: `rshowren_${resIdx}_${userIdx}` }], [{ text: "🗑 DELETE", callback_data: `rdel_${resIdx}_${userIdx}` }]];
          await bot.sendMessage(chatId, msg, { parse_mode: 'Markdown', reply_markup: { inline_keyboard: btns } });
     } else {
-         bot.sendMessage(chatId, `❌ **User Not Found**\nEmail: ${u.email}\n(It may have been deleted from the panel manually).`);
+         bot.sendMessage(chatId, `❌ **User Not Found**\nEmail: ${u.email}\n(Removed from bot list).`);
+         // Cleanup Ghost
+         config.resellers[resIdx].createdUsers.splice(userIdx, 1);
+         saveConfig(config);
     }
 }
 
-// 3. FIX ADMIN DETAILS (USES GLOBAL SEARCH)
 async function showAdminResellerUserDetails(chatId, resIdxStr, userIdxStr) {
     const config = loadConfig(); const resIdx = parseInt(resIdxStr); const userIdx = parseInt(userIdxStr);
     const reseller = config.resellers[resIdx]; const u = reseller.createdUsers[userIdx]; const server = config.servers[u.serverIdx];
-    
-    // ** GLOBAL SEARCH CALL **
     const result = await findUserInPanelGlobal(server, u.email);
-
     if (result && result.found) {
         const client = result.client;
         const inboundObj = result.inbound;
         const totalUsed = getClientTraffic(client, result.clientStats);
         const protocolName = inboundObj.protocol === 'vmess' ? 'VMess' : (inboundObj.protocol === 'vless' ? 'VLESS' : 'Shadowsocks');
-        
         const msg = `👮 **Admin User Control**
 -------------------------
 👤 Name: ${u.name}
@@ -744,27 +698,22 @@ async function renewResellerUser(chatId, resIdxStr, userIdxStr, price, days, lim
     const resIdx = parseInt(resIdxStr); const userIdx = parseInt(userIdxStr);
     const userRec = cfg.resellers[resIdx].createdUsers[userIdx];
     const srv = cfg.servers[userRec.serverIdx];
-    
-    // ** GLOBAL SEARCH for Renew **
     const result = await findUserInPanelGlobal(srv, userRec.email);
 
     if (result && result.found) {
         try {
-            // Reset Traffic First
-            try { await axios.post(`${srv.url}/panel/api/inbounds/resetClientTraffic/${result.inbound.id}/${userRec.email}`, {}, { headers: { 'Cookie': result.cookies } }); } catch(e) {}
-            
-            // Update Client
+            try { await axiosInstance.post(`${srv.url}/panel/api/inbounds/resetClientTraffic/${result.inbound.id}/${userRec.email}`, {}, { headers: { 'Cookie': result.cookies } }); } catch(e) {}
             const inbound = result.inbound;
             const settings = result.settings;
             const clientIdx = settings.clients.findIndex(c => c.email === userRec.email);
             
             settings.clients[clientIdx].expiryTime = Date.now() + (days * 86400000);
-            settings.clients[clientIdx].enable = true; // Auto-Enable on Renew
+            settings.clients[clientIdx].enable = true; 
             settings.clients[clientIdx].up = 0;
             settings.clients[clientIdx].down = 0;
             if(limitGB) settings.clients[clientIdx].totalGB = limitGB * 1024 * 1024 * 1024;
 
-            await axios.post(`${srv.url}/panel/api/inbounds/update/${inbound.id}`, { ...inbound, settings: JSON.stringify(settings) }, { headers: { 'Cookie': result.cookies } });
+            await axiosInstance.post(`${srv.url}/panel/api/inbounds/update/${inbound.id}`, { ...inbound, settings: JSON.stringify(settings) }, { headers: { 'Cookie': result.cookies } });
 
             cfg.resellers[resIdx].balance -= price;
             const session = cfg.activeSessions.find(s => s.email === userRec.email);
@@ -783,42 +732,37 @@ async function deleteResellerUser(chatId, resIdxStr, userIdxStr, isAdmin = false
     const resIdx = parseInt(resIdxStr); const userIdx = parseInt(userIdxStr);
     const userRec = cfg.resellers[resIdx].createdUsers[userIdx];
     const srv = cfg.servers[userRec.serverIdx];
-
     const result = await findUserInPanelGlobal(srv, userRec.email);
 
     if (result && result.found) {
         try {
             let settings = result.settings;
             settings.clients = settings.clients.filter(c => c.email !== userRec.email);
-            await axios.post(`${srv.url}/panel/api/inbounds/update/${result.inbound.id}`, { ...result.inbound, settings: JSON.stringify(settings) }, { headers: { 'Cookie': result.cookies } });
+            await axiosInstance.post(`${srv.url}/panel/api/inbounds/update/${result.inbound.id}`, { ...result.inbound, settings: JSON.stringify(settings) }, { headers: { 'Cookie': result.cookies } });
         } catch(e) {}
     }
-
     cfg.resellers[resIdx].createdUsers.splice(userIdx, 1);
     cfg.activeSessions = cfg.activeSessions.filter(s => s.email !== userRec.email);
     saveConfig(cfg);
-
     if(msgIdToDelete) try { await bot.deleteMessage(chatId, msgIdToDelete); } catch(e){}
     const header = isAdmin ? "👮 **Admin Deleted User:**" : "🗑 **Deleted User:**";
     bot.sendMessage(chatId, `${header} ${userRec.name}`);
 }
 
-async function login(server) { try { const res = await axios.post(`${server.url}/login`, { username: server.username, password: server.password }); return res.headers['set-cookie']; } catch (e) { return null; } }
+async function login(server) { try { const res = await axiosInstance.post(`${server.url}/login`, { username: server.username, password: server.password }); return res.headers['set-cookie']; } catch (e) { return null; } }
 async function generateResellerKey(chatId, srv, plan, protocol, resIdx, customName) {
     const uuid = uuidv4(); const cookies = await login(srv); if (!cookies) return bot.sendMessage(chatId, "❌ Error");
     let inboundId = protocol==='vmess'?srv.vmessId:(protocol==='ss'?srv.ssId:srv.vlessId);
     try {
         const email = `${customName}_${uuid.slice(0,4)}`; const remark = `R-${customName} (${plan.limitGB}GB)`;
-        await axios.post(`${srv.url}/panel/api/inbounds/addClient`, { id: parseInt(inboundId), settings: JSON.stringify({ clients: [{ id: uuid, password: uuid, email: email, totalGB: plan.limitGB*1024*1024*1024, expiryTime: Date.now() + (plan.days*86400000), enable: true, flow: "" }] }) }, { headers: { 'Cookie': cookies } });
+        await axiosInstance.post(`${srv.url}/panel/api/inbounds/addClient`, { id: parseInt(inboundId), settings: JSON.stringify({ clients: [{ id: uuid, password: uuid, email: email, totalGB: plan.limitGB*1024*1024*1024, expiryTime: Date.now() + (plan.days*86400000), enable: true, flow: "" }] }) }, { headers: { 'Cookie': cookies } });
         const cfg = loadConfig();
         if(!cfg.resellers[resIdx].createdUsers) cfg.resellers[resIdx].createdUsers = [];
         cfg.resellers[resIdx].createdUsers.push({ name: customName, email: email, inboundId: inboundId, serverIdx: cfg.servers.findIndex(s=>s.url === srv.url), planPrice: plan.price, planDays: plan.days });
-        
         if(!cfg.activeSessions) cfg.activeSessions = [];
         cfg.activeSessions.push({ email: email, chatId: chatId, serverIdx: cfg.servers.findIndex(s=>s.url === srv.url), notified: false });
-
         saveConfig(cfg);
-        const res = await axios.get(`${srv.url}/panel/api/inbounds/get/${inboundId}`, { headers: { 'Cookie': cookies } });
+        const res = await axiosInstance.get(`${srv.url}/panel/api/inbounds/get/${inboundId}`, { headers: { 'Cookie': cookies } });
         const inbound = res.data.obj; const settings = JSON.parse(inbound.settings); const client = settings.clients.find(c => c.email === email); const ip = srv.url.split('//')[1].split(':')[0]; const link = generateLink(protocol, inbound, client, ip, remark);
         bot.sendMessage(chatId, `✅ **Created!**\nName: ${customName}\n\n\`${link}\``, { parse_mode: 'Markdown' });
     } catch (e) { bot.sendMessage(chatId, "❌ Error."); }
@@ -828,14 +772,12 @@ async function generateAndSendKey(chatId, srv, plan, protocol, isTrial) {
     let inboundId = protocol==='vmess'?srv.vmessId:(protocol==='ss'?srv.ssId:srv.vlessId);
     try {
         const userChat = await bot.getChat(chatId); const cleanName = (userChat.first_name||"User").replace(/[^a-zA-Z0-9 ]/g, "").trim(); const email = `${cleanName}_${Date.now().toString().slice(-4)}`; const remark = isTrial ? `Trial-${cleanName}` : `${cleanName} (${plan.limitGB}GB)`;
-        await axios.post(`${srv.url}/panel/api/inbounds/addClient`, { id: parseInt(inboundId), settings: JSON.stringify({ clients: [{ id: uuid, password: uuid, email: email, totalGB: plan.limitGB*1024*1024*1024, expiryTime: Date.now() + (plan.days*86400000), enable: true, flow: "" }] }) }, { headers: { 'Cookie': cookies } });
-        
+        await axiosInstance.post(`${srv.url}/panel/api/inbounds/addClient`, { id: parseInt(inboundId), settings: JSON.stringify({ clients: [{ id: uuid, password: uuid, email: email, totalGB: plan.limitGB*1024*1024*1024, expiryTime: Date.now() + (plan.days*86400000), enable: true, flow: "" }] }) }, { headers: { 'Cookie': cookies } });
         const cfg = loadConfig();
         if(!cfg.activeSessions) cfg.activeSessions = [];
         cfg.activeSessions.push({ email: email, chatId: chatId, serverIdx: cfg.servers.findIndex(s=>s.url === srv.url), notified: false });
         saveConfig(cfg);
-
-        const res = await axios.get(`${srv.url}/panel/api/inbounds/get/${inboundId}`, { headers: { 'Cookie': cookies } });
+        const res = await axiosInstance.get(`${srv.url}/panel/api/inbounds/get/${inboundId}`, { headers: { 'Cookie': cookies } });
         const inbound = res.data.obj; const settings = JSON.parse(inbound.settings); const client = settings.clients.find(c => c.email === email); const ip = srv.url.split('//')[1].split(':')[0]; const link = generateLink(protocol, inbound, client, ip, remark);
         bot.sendMessage(chatId, `✅ **Key Generated!**\n${link}`, {parse_mode:'Markdown'});
     } catch(e) { bot.sendMessage(chatId, "❌ Error"); }
@@ -873,7 +815,7 @@ async function fetchAndShowServerUsers(chatId, srvIdx, page = 0, msgIdToEdit = n
     try {
         const cookies = await login(server);
         if(!cookies) return bot.sendMessage(chatId, "❌ Login failed.");
-        const res = await axios.get(`${server.url}/panel/api/inbounds/list`, { headers: { 'Cookie': cookies } });
+        const res = await axiosInstance.get(`${server.url}/panel/api/inbounds/list`, { headers: { 'Cookie': cookies } });
         if(res.data && res.data.success) {
             let allClients = [];
             res.data.obj.forEach(inb => {
@@ -914,13 +856,11 @@ async function renderServerUserPage(chatId, page, msgIdToEdit = null) {
     if(msgIdToEdit) bot.editMessageText(msg, { chat_id: chatId, message_id: msgIdToEdit, parse_mode: 'Markdown', reply_markup: { inline_keyboard: btns } });
     else bot.sendMessage(chatId, msg, { parse_mode: 'Markdown', reply_markup: { inline_keyboard: btns } });
 }
-
-// --- GLOBAL SEARCH ---
 async function findUserInPanelGlobal(srv, email) {
     try {
         const cookies = await login(srv);
         if(!cookies) return null;
-        const res = await axios.get(`${srv.url}/panel/api/inbounds/list`, { headers: { 'Cookie': cookies } });
+        const res = await axiosInstance.get(`${srv.url}/panel/api/inbounds/list`, { headers: { 'Cookie': cookies } });
         if(!res.data || !res.data.success) return null;
         const allInbounds = res.data.obj;
         for (const inb of allInbounds) {
