@@ -6,7 +6,7 @@ GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 NC='\033[0m'
 
-echo -e "${GREEN}=== VPN Shop Backend Installer (Multi-Trial & Change Server) ===${NC}"
+echo -e "${GREEN}=== VPN Shop Backend Installer (Smart Change Server Logic) ===${NC}"
 
 # 1. Check Root
 if [ "$EUID" -ne 0 ]; then
@@ -240,7 +240,7 @@ function startBot() {
         buy: (config.buttons && config.buttons.buy) ? config.buttons.buy : "🛒 Buy Key",
         mykey: (config.buttons && config.buttons.mykey) ? config.buttons.mykey : "🔑 My Key",
         info: (config.buttons && config.buttons.info) ? config.buttons.info : "👤 Account Info",
-        change_srv: "🔄 Change Server", // New Button
+        change_srv: "🔄 Change Server", 
         support: (config.buttons && config.buttons.support) ? config.buttons.support : "🆘 Support",
         reseller: (config.buttons && config.buttons.reseller) ? config.buttons.reseller : "🤝 Reseller Login",
         resell_buy: (config.buttons && config.buttons.resell_buy) ? config.buttons.resell_buy : "🛒 Buy Stock",
@@ -276,7 +276,7 @@ function startBot() {
         if (TRIAL_ENABLED) row1.push({ text: BTN.trial });
         row1.push({ text: BTN.buy }); kb.push(row1);
         kb.push([{ text: BTN.mykey }, { text: BTN.info }]); 
-        kb.push([{ text: BTN.change_srv }, { text: BTN.support }]); // Added Change Server
+        kb.push([{ text: BTN.change_srv }, { text: BTN.support }]); 
         kb.push([{ text: BTN.reseller }]);
         if (isAdmin(userId)) kb.unshift([{ text: "👮‍♂️ Admin Panel" }]);
         return kb;
@@ -286,7 +286,7 @@ function startBot() {
         return [
             [{ text: `${BTN.resell_buy} (${balance} Ks)` }],
             [{ text: BTN.resell_create }, { text: BTN.resell_extend }],
-            [{ text: BTN.resell_users }, { text: BTN.change_srv }], // Added Change Server to Reseller
+            [{ text: BTN.resell_users }, { text: BTN.change_srv }], 
             [{ text: BTN.resell_logout }]
         ];
     }
@@ -433,7 +433,6 @@ function startBot() {
                     myKeys.forEach(k => {
                         let cleanName = k.name.split('|')[0].replace(`(R-${rUser})`, '').trim();
                         const srvIdx = servers.findIndex(s => s.url === k._serverUrl);
-                        // Add Button for Migration Select User
                         if (srvIdx !== -1) {
                             allButtons.push([{ text: `🔄 ${cleanName} (${k._serverName || 'Srv'})`, callback_data: `rmigrate_sel_${srvIdx}_${k.id}` }]);
                         }
@@ -550,8 +549,44 @@ function startBot() {
             return;
         }
         
-        // --- USER CHANGE SERVER ---
+        // --- CHANGE SERVER (USER & ADMIN LOGIC) ---
         if (text === BTN.change_srv) {
+            
+            // 1. ADMIN LOGIC (Show All Users to Migrate)
+            if (isAdmin(chatId)) {
+                bot.sendMessage(chatId, "🔎 Loading ALL users for migration (Admin Mode)...");
+                try {
+                    const allKeys = await getAllKeysFromAllServers();
+                    if(allKeys.length === 0) return bot.sendMessage(chatId, "❌ No users found.");
+                    
+                    // Sort by ID
+                    allKeys.sort((a,b) => parseInt(a.id) - parseInt(b.id));
+
+                    let allButtons = [];
+                    const servers = getServers();
+                    allKeys.forEach(k => {
+                        let cleanName = k.name.split('|')[0].trim();
+                        // Truncate name
+                        if(cleanName.length > 20) cleanName = cleanName.substring(0, 20) + "..";
+                        const srvIdx = servers.findIndex(s => s.url === k._serverUrl);
+                        if (srvIdx !== -1) {
+                            allButtons.push([{ text: `🔄 ${cleanName} (${k._serverName || 'Srv'})`, callback_data: `amigrate_sel_${srvIdx}_${k.id}` }]);
+                        }
+                    });
+
+                    const chunkSize = 10; 
+                    for (let i = 0; i < allButtons.length; i += chunkSize) {
+                        const chunk = allButtons.slice(i, i + chunkSize);
+                        await bot.sendMessage(chatId, `⚙️ **Select User to MIGRATE (Set ${Math.floor(i / chunkSize) + 1})**`, { 
+                            parse_mode: 'Markdown', 
+                            reply_markup: { inline_keyboard: chunk } 
+                        });
+                    }
+                } catch(e) { bot.sendMessage(chatId, "⚠️ Server Error"); }
+                return;
+            }
+
+            // 2. REGULAR USER LOGIC (Migrate Own Key)
             const userFullName = `${msg.from.first_name}`.trim(); 
             bot.sendMessage(chatId, "🔎 Searching for your key to migrate...");
             try {
@@ -559,7 +594,6 @@ function startBot() {
                 if (!result) return bot.sendMessage(chatId, "❌ Key Not Found! You can only migrate if you have an active key.");
                 
                 const { key, serverName, serverUrl } = result;
-                // Find server index
                 const servers = getServers();
                 const srvIdx = servers.findIndex(s => s.url === serverUrl);
                 
@@ -733,13 +767,32 @@ function startBot() {
             const parts = data.split('_');
             const oldServerIdx = parseInt(parts[2]);
             const oldKeyId = parts[3];
-            const newServerIdx = parseInt(parts[4]); // This comes from button choice (getServerKeyboard prepends prefix)
-            // Wait, logic correction: The button pressed IS the target server.
-            // The getServerKeyboard creates buttons with data `${prefix}_${serverIndex}`.
-            // So if prefix is `umigrate_do_${oldServerIdx}_${oldKeyId}`, then data is `umigrate_do_${oldServerIdx}_${oldKeyId}_${targetServerIdx}`.
+            const newServerIdx = parseInt(parts[4]); 
             
             await migrateKey(chatId, oldKeyId, oldServerIdx, newServerIdx, false);
             return;
+        }
+
+        // --- ADMIN MIGRATION CALLBACKS ---
+        if (data.startsWith('amigrate_sel_')) {
+            if (!isAdmin(chatId)) return;
+            const parts = data.split('_');
+            const oldServerIdx = parseInt(parts[2]);
+            const oldKeyId = parts[3];
+            const keyboard = getServerKeyboard(`amigrate_do_${oldServerIdx}_${oldKeyId}`);
+            bot.sendMessage(chatId, "🔄 **(Admin) Select Target Server:**", { reply_markup: { inline_keyboard: keyboard } });
+            return;
+        }
+
+        if (data.startsWith('amigrate_do_')) {
+             if (!isAdmin(chatId)) return;
+             const parts = data.split('_');
+             const oldServerIdx = parseInt(parts[2]);
+             const oldKeyId = parts[3];
+             const newServerIdx = parseInt(parts[4]);
+             // Admin override: pass false for isReseller to skip name checks
+             await migrateKey(chatId, oldKeyId, oldServerIdx, newServerIdx, false);
+             return;
         }
 
         // --- RESELLER MIGRATION CALLBACKS ---
@@ -1042,7 +1095,7 @@ function startBot() {
                     
                     bot.sendMessage(chatId, msg, { reply_markup: { inline_keyboard: [
                         [{ text: "⏳ RENEW / EXTEND", callback_data: `adm_ext_${key.id}` }], 
-                        [{ text: "🔄 CHANGE SERVER", callback_data: `rmigrate_sel_${srvIdx}_${key.id}` }], // Reusing Reseller Logic layout, but admin has perm
+                        [{ text: "🔄 CHANGE SERVER", callback_data: `amigrate_sel_${srvIdx}_${key.id}` }], 
                         [{ text: "🗑️ DELETE", callback_data: `del_${key.id}` }]
                     ] } }); 
                 } catch(e) {} 
@@ -1406,7 +1459,7 @@ pm2 startup
 pm2 save
 
 echo -e "${GREEN}==========================================${NC}"
-echo -e "${GREEN} INSTALLATION COMPLETE! (Multi-Trial & Change Server) ${NC}"
+echo -e "${GREEN} INSTALLATION COMPLETE! (Smart Change Server Logic) ${NC}"
 echo -e "${GREEN}==========================================${NC}"
 echo -e "Backend Port: ${YELLOW}3000${NC}"
 echo -e "Service Name: ${YELLOW}vpn-shop${NC}"
