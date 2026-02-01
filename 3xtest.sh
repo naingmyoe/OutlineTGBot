@@ -1,10 +1,10 @@
 #!/bin/bash
 
-# 3xbot Ultimate Installer (v9.9.5 - Final Fix)
-# Features:
-# 1. All Server Keys Manager (Global User List).
-# 2. Universal Link Generator (Supports TLS, Reality, TCP/HTTP, WS, gRPC automatically).
-# 3. Auto-detects security settings from panel.
+# 3xbot Ultimate Installer (v9.9.6 - Reality Key & Web Panel Fix)
+# Updates:
+# 1. Fixed Reality Link missing 'pbk' and 'spx'.
+# 2. Fixed Web Panel "Cannot GET /" error.
+# 3. Optimized Port 3000 handling.
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -13,7 +13,7 @@ CYAN='\033[0;36m'
 NC='\033[0m'
 
 echo -e "${CYAN}=====================================================${NC}"
-echo -e "${CYAN}    3xbot Installer v9.9.5 (Universal Link Fix)      ${NC}"
+echo -e "${CYAN}    3xbot Installer v9.9.6 (Final Fix)               ${NC}"
 echo -e "${CYAN}=====================================================${NC}"
 
 # Check Root
@@ -24,6 +24,7 @@ fi
 
 # Check Node.js
 if ! command -v node &> /dev/null; then
+    echo -e "${YELLOW}[INFO] Installing Node.js...${NC}"
     curl -fsSL https://deb.nodesource.com/setup_18.x | sudo -E bash -
     sudo apt-get install -y nodejs
 fi
@@ -37,7 +38,7 @@ cd "$PROJECT_DIR"
 cat > package.json <<EOF
 {
   "name": "3xbot-manager",
-  "version": "9.9.5",
+  "version": "9.9.6",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
@@ -55,8 +56,9 @@ cat > package.json <<EOF
 }
 EOF
 
-# 2. Config Template (Only if not exists - Keeps your data safe)
+# 2. Config Template (Safety Check)
 if [ ! -f config.json ]; then
+    echo -e "${YELLOW}[INFO] Creating new config.json...${NC}"
     cat << 'EOF' > config.json
 {
   "telegram": {
@@ -90,9 +92,59 @@ if [ ! -f config.json ]; then
   "activeSessions": []
 }
 EOF
+else
+    echo -e "${GREEN}[INFO] Existing config.json found. Keeping data safe.${NC}"
 fi
 
-# 3. Create index.js (UPDATED: With New Link Generator)
+# 3. Create Web Panel HTML (Fix for "Cannot GET /")
+cat > public/index.html <<'EOF'
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>3xbot Manager</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <style>body{background:#f8f9fa;padding:20px}.card{margin-bottom:20px}</style>
+</head>
+<body>
+    <div class="container">
+        <h2 class="text-center mb-4">🤖 3xbot Manager</h2>
+        <div id="status" class="alert alert-info">Loading...</div>
+        <div class="row">
+            <div class="col-md-6">
+                <div class="card">
+                    <div class="card-header bg-primary text-white">System Status</div>
+                    <div class="card-body">
+                        <p><strong>Bot Status:</strong> <span class="badge bg-success">Online</span></p>
+                        <button onclick="location.reload()" class="btn btn-sm btn-secondary">Refresh</button>
+                    </div>
+                </div>
+            </div>
+            <div class="col-md-6">
+                 <div class="card">
+                    <div class="card-header bg-dark text-white">Config</div>
+                    <div class="card-body">
+                        <p>To edit config, please use the <code>config.json</code> file in your VPS directly or use the Telegram Bot commands.</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+    <script>
+        fetch('/api/config').then(res => res.json()).then(data => {
+            document.getElementById('status').className = 'alert alert-success';
+            document.getElementById('status').innerText = '✅ Connected to Bot Backend';
+        }).catch(err => {
+            document.getElementById('status').className = 'alert alert-danger';
+            document.getElementById('status').innerText = '❌ Connection Failed';
+        });
+    </script>
+</body>
+</html>
+EOF
+
+# 4. Create index.js (Full Logic with Reality Fix)
 cat > index.js <<'EOF'
 const express = require('express');
 const bodyParser = require('body-parser');
@@ -111,7 +163,7 @@ const configPath = path.join(__dirname, 'config.json');
 
 app.use(cors());
 app.use(bodyParser.json());
-app.use(express.static('public'));
+app.use(express.static('public')); // Serve the HTML file
 
 const axiosInstance = axios.create({ timeout: 10000 });
 
@@ -239,7 +291,15 @@ app.post('/api/config', (req, res) => {
     saveConfig(req.body);
     res.json({ success: true });
 });
-app.listen(PORT, () => console.log(`✅ Web Panel running on Port ${PORT}`));
+
+// Start Web Server with Error Handling
+const server = app.listen(PORT, () => console.log(`✅ Web Panel running on Port ${PORT}`));
+server.on('error', (e) => {
+    if (e.code === 'EADDRINUSE') {
+        console.log('⚠️ Port 3000 busy, retrying...');
+        setTimeout(() => { server.close(); server.listen(PORT); }, 1000);
+    }
+});
 
 // --- BOT LOGIC ---
 let config = loadConfig();
@@ -1044,7 +1104,7 @@ async function deleteResellerUser(chatId, resIdxStr, userIdxStr, isAdmin = false
 
 async function login(server) { try { const res = await axiosInstance.post(`${server.url}/login`, { username: server.username, password: server.password }); return res.headers['set-cookie']; } catch (e) { return null; } }
 
-// --- UPDATED LINK GENERATOR (Universal Support) ---
+// --- FIXED GENERATOR (Reality PBK/SPX + TLS + None) ---
 function generateLink(type, inbound, client, ip, remark) {
     const port = inbound.port;
     const stream = JSON.parse(inbound.streamSettings);
@@ -1057,6 +1117,7 @@ function generateLink(type, inbound, client, ip, remark) {
     let fp = "";
     let pbk = "";
     let sid = "";
+    let spx = ""; 
     let typeHeader = "none"; 
 
     if (net === 'ws') {
@@ -1076,10 +1137,14 @@ function generateLink(type, inbound, client, ip, remark) {
         sni = stream.tlsSettings?.serverNames?.[0] || host || "";
         fp = stream.tlsSettings?.fingerprint || "chrome"; 
     } else if (sec === 'reality') {
-        sni = stream.realitySettings?.serverNames?.[0] || "";
-        fp = stream.realitySettings?.fingerprint || "chrome";
-        pbk = stream.realitySettings?.publicKey || "";
-        sid = stream.realitySettings?.shortIds?.[0] || "";
+        const reality = stream.realitySettings;
+        if (reality) {
+            sni = reality.serverNames?.[0] || "";
+            fp = reality.fingerprint || "chrome";
+            pbk = reality.publicKey || "";
+            sid = reality.shortIds?.[0] || "";
+            spx = reality.spiderX || "";
+        }
     }
 
     if (type === 'vless') {
@@ -1089,9 +1154,14 @@ function generateLink(type, inbound, client, ip, remark) {
         if (typeHeader !== 'none') link += `&headerType=${typeHeader}`;
         if (net === 'grpc') link += `&serviceName=${encodeURIComponent(path)}`;
         
-        if (sec === 'tls') link += `&security=tls&sni=${sni}&fp=${fp}`;
-        else if (sec === 'reality') link += `&security=reality&sni=${sni}&fp=${fp}&pbk=${pbk}&sid=${sid}`;
-        else link += `&security=none`;
+        if (sec === 'tls') {
+            link += `&security=tls&sni=${sni}&fp=${fp}`;
+        } else if (sec === 'reality') {
+            link += `&security=reality&sni=${sni}&fp=${fp}&pbk=${pbk}&sid=${sid}`;
+            if (spx) link += `&spx=${encodeURIComponent(spx)}`;
+        } else {
+            link += `&security=none`;
+        }
         
         return `${link}#${encodeURIComponent(remark)}`;
     }
@@ -1173,17 +1243,20 @@ async function handleAdminResellerUserList(chatId, resIdx, page, msgIdToEdit = n
 
 EOF
 
-# 4. Install & Run
+# 5. Clean Port & Install
+echo -e "${YELLOW}[INFO] Cleaning Port 3000...${NC}"
+fuser -k 3000/tcp > /dev/null 2>&1
+
 echo -e "${YELLOW}[INFO] Installing Dependencies...${NC}"
 npm install
 npm install -g pm2
 
 echo -e "${YELLOW}[INFO] Starting System...${NC}"
-pm2 delete 3xbot 2>/dev/null
+pm2 delete 3xbot > /dev/null 2>&1
 pm2 start index.js --name "3xbot"
 pm2 save
 pm2 startup
 
 IP=$(curl -s ifconfig.me)
-echo -e "${GREEN}✅ UPDATE COMPLETE! (Universal Link Fix)${NC}"
+echo -e "${GREEN}✅ UPDATE COMPLETE! (Reality Fixed & Web Panel Restored)${NC}"
 echo -e "${GREEN}Panel: http://$IP:3000${NC}"
