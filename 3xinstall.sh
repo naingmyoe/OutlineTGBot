@@ -1,11 +1,10 @@
 #!/bin/bash
 
-# 3xbot Ultimate Installer (v9.9.4 - All Server Keys Manager)
-# Updates:
-# 1. Added "All Server Keys" button in Admin Panel.
-# 2. Aggregates users from ALL servers into a single paginated list.
-# 3. Inline buttons format: Icon + [ServerName] + Username.
-# 4. Added Global Admin Control (Delete/Renew) for these users.
+# 3xbot Ultimate Installer (v9.9.9 - Payment Display Update)
+# Features:
+# 1. Shows configured Payment Methods (Bank, Phone, Name) during checkout.
+# 2. Updated Burmese text for Screenshot request.
+# 3. Maintains PBK Fix and Universal Link Generator.
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -14,7 +13,7 @@ CYAN='\033[0;36m'
 NC='\033[0m'
 
 echo -e "${CYAN}=====================================================${NC}"
-echo -e "${CYAN}    3xbot Installer v9.9.4 (All Server Manager)      ${NC}"
+echo -e "${CYAN}    3xbot Installer v9.9.9 (Payment Update)          ${NC}"
 echo -e "${CYAN}=====================================================${NC}"
 
 # Check Root
@@ -38,7 +37,7 @@ cd "$PROJECT_DIR"
 cat > package.json <<EOF
 {
   "name": "3xbot-manager",
-  "version": "9.9.4",
+  "version": "9.9.9",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
@@ -56,7 +55,7 @@ cat > package.json <<EOF
 }
 EOF
 
-# 2. Config Template (Only if not exists)
+# 2. Config Template (Added paymentMethods array support)
 if [ ! -f config.json ]; then
     cat << 'EOF' > config.json
 {
@@ -82,6 +81,8 @@ if [ ! -f config.json ]; then
     "vmess": true,
     "ss": true
   },
+  "realityKey": "",
+  "paymentMethods": [],
   "allUsers": [],
   "trialUsers": [],
   "servers": [],
@@ -93,7 +94,7 @@ if [ ! -f config.json ]; then
 EOF
 fi
 
-# 3. Create index.js (UPDATED: All Server Logic)
+# 3. Create index.js (UPDATED: Payment Display Logic)
 cat > index.js <<'EOF'
 const express = require('express');
 const bodyParser = require('body-parser');
@@ -114,7 +115,7 @@ app.use(cors());
 app.use(bodyParser.json());
 app.use(express.static('public'));
 
-const axiosInstance = axios.create({ timeout: 10000 }); // 10s Timeout prevents hanging
+const axiosInstance = axios.create({ timeout: 10000 });
 
 // State Management
 let pendingOrders = {}; 
@@ -129,6 +130,7 @@ function loadConfig() {
         if(!cfg.allUsers) cfg.allUsers = []; 
         if(!cfg.activeSessions) cfg.activeSessions = [];
         if(!cfg.protocols) cfg.protocols = { vless: true, vmess: true, ss: true };
+        if(!cfg.paymentMethods) cfg.paymentMethods = []; // Ensure payments exist
         return cfg; 
     } catch(e) { return {}; }
 }
@@ -200,7 +202,6 @@ async function syncResellerUsers(resIdx) {
                         }
                         validUsers.push(u);
                     } else { 
-                        console.log(`[SYNC] Removing ghost user: ${u.email}`); 
                         hasChanges = true; 
                     }
                 });
@@ -240,7 +241,15 @@ app.post('/api/config', (req, res) => {
     saveConfig(req.body);
     res.json({ success: true });
 });
-app.listen(PORT, () => console.log(`✅ Web Panel running on Port ${PORT}`));
+
+// Port handling for Web Panel
+const server = app.listen(PORT, () => console.log(`✅ Web Panel running on Port ${PORT}`));
+server.on('error', (e) => {
+    if (e.code === 'EADDRINUSE') {
+        console.log('⚠️ Port 3000 busy, retrying...');
+        setTimeout(() => { server.close(); server.listen(PORT); }, 1000);
+    }
+});
 
 // --- BOT LOGIC ---
 let config = loadConfig();
@@ -348,7 +357,6 @@ function startBot(token) {
         if (isAdmin(chatId)) {
             if (text === "🔙 Back to Main Menu") { delete adminSession[chatId]; sendMainMenu(chatId); return; }
             
-            // --- ALL SERVER KEYS LOGIC ---
             if (text === "🔑 All Server Keys") {
                 bot.sendMessage(chatId, "🔄 **Fetching users from all servers...**\n(Please wait, this may take a moment)", {parse_mode: 'Markdown'});
                 await fetchAllServerUsers(chatId);
@@ -439,11 +447,22 @@ function startBot(token) {
              const [_, srvIdx, proto, planIdx] = data.split('_');
              pendingOrders[chatId] = { srvIdx, proto, planIdx };
              const plan = currentCfg.plans[planIdx];
-             const msgText = `✅ **Selected**
+             
+             // --- PAYMENT METHODS DISPLAY (NEW) ---
+             let payList = "";
+             if(currentCfg.paymentMethods && currentCfg.paymentMethods.length > 0) {
+                 payList = "\n💳 **Payment Accounts:**\n";
+                 currentCfg.paymentMethods.forEach(pm => {
+                     payList += `🏦 ${pm.bank}: \`${pm.phone}\`\n👤 ${pm.name}\n------------------\n`;
+                 });
+             }
+
+             const msgText = `✅ **Order Summary**
 ⏳ Days: ${plan.days} Days
 📡 GB: ${plan.limitGB} GB
 💰 Price: ${plan.price} MMK
-❗️ **Please upload payment slip.**`;
+${payList}
+⚠️ **ငွေလွှဲပြီးပါက ပြေစာ (Screenshot) ပို့ပေးပါ။**`;
              bot.sendMessage(chatId, msgText, {parse_mode: 'Markdown'});
         }
         if (data.startsWith('rplan_')) { 
@@ -475,7 +494,6 @@ function startBot(token) {
                 delete pendingOrders[uId];
             }
         }
-        // --- ALL SERVER CALLBACKS ---
         if (data.startsWith('allu_page_')) {
             const page = parseInt(data.split('_')[2]);
             await renderAllUsersPage(chatId, page, query.message.message_id);
@@ -493,16 +511,13 @@ function startBot(token) {
             const index = parseInt(indexStr);
             const planIdx = parseInt(planIdxStr);
             if (isNaN(planIdx)) {
-                // Show Plan Selection
                 const planBtns = currentCfg.plans.map((p, idx) => [{ text: `${p.days}Days ${p.limitGB}GB`, callback_data: `allu_ren_${index}_${idx}` }]);
                 planBtns.push([{ text: "🔙 Back", callback_data: `allu_view_${index}` }]);
                 bot.editMessageText("⏳ **Select Renew Plan:**", { chat_id: chatId, message_id: query.message.message_id, reply_markup: { inline_keyboard: planBtns }, parse_mode: 'Markdown' });
             } else {
-                // Do Renew
                 await renewGlobalUser(chatId, index, currentCfg.plans[planIdx]);
             }
         }
-
         if (data.startsWith('admviewres_')) { await handleAdminResellerUserList(chatId, parseInt(data.split('_')[1]), 0); }
         if (data.startsWith('admu_page_')) { const [_, resIdx, page] = data.split('_'); await handleAdminResellerUserList(chatId, parseInt(resIdx), parseInt(page), query.message.message_id); }
         if (data.startsWith('admshowu_')) { const [_, resIdx, userIdx] = data.split('_'); await showAdminResellerUserDetails(chatId, resIdx, userIdx); }
@@ -560,7 +575,6 @@ async function fetchAllServerUsers(chatId) {
     const config = loadConfig();
     let allAggregatedUsers = [];
 
-    // Iterate through all servers safely
     for (let i = 0; i < config.servers.length; i++) {
         const srv = config.servers[i];
         try {
@@ -575,7 +589,7 @@ async function fetchAllServerUsers(chatId) {
                             settings.clients.forEach(c => {
                                 allAggregatedUsers.push({
                                     email: c.email,
-                                    name: c.email.split('_')[0], // Guess name
+                                    name: c.email.split('_')[0],
                                     enable: c.enable,
                                     expiryTime: c.expiryTime,
                                     totalGB: c.totalGB,
@@ -596,8 +610,6 @@ async function fetchAllServerUsers(chatId) {
     if (allAggregatedUsers.length === 0) {
         return bot.sendMessage(chatId, "⚠️ No users found or servers unreachable.");
     }
-
-    // Store in session
     adminSession[chatId] = { type: 'ALL_KEYS', users: allAggregatedUsers };
     await renderAllUsersPage(chatId, 0);
 }
@@ -614,7 +626,6 @@ async function renderAllUsersPage(chatId, page, msgIdToEdit = null) {
 
     const btns = currentUsers.map((u, i) => {
         const icon = u.enable ? "🟢" : "🔴";
-        // Inline Button: Status [Server] Username
         return [{ text: `${icon} [${u.serverName}] ${u.email}`, callback_data: `allu_view_${start + i}` }];
     });
 
@@ -622,7 +633,7 @@ async function renderAllUsersPage(chatId, page, msgIdToEdit = null) {
     if (page > 0) navRow.push({ text: "⬅️ Prev", callback_data: `allu_page_${page - 1}` });
     if (page < totalPages - 1) navRow.push({ text: "Next ➡️", callback_data: `allu_page_${page + 1}` });
     if (navRow.length > 0) btns.push(navRow);
-    btns.push([{text: "🔙 Admin Menu", callback_data: "none"}]); // Just visual, back logic handled by text menu mostly
+    btns.push([{text: "🔙 Admin Menu", callback_data: "none"}]); 
 
     const text = `🌏 **All Server Keys (${totalUsers})**\nPage: ${page + 1}/${totalPages}`;
 
@@ -663,7 +674,7 @@ ${createProgressBar(totalUsed, client.totalGB)}`;
         const btns = [
             [{ text: "⏳ RENEW / EXTEND", callback_data: `allu_ren_${index}` }],
             [{ text: "🗑 DELETE USER", callback_data: `allu_del_${index}` }],
-            [{ text: "🔙 Back to List", callback_data: `allu_page_0` }] // Simplification: go to start or calc page
+            [{ text: "🔙 Back to List", callback_data: `allu_page_0` }]
         ];
         
         bot.sendMessage(chatId, msg, { parse_mode: 'Markdown', reply_markup: { inline_keyboard: btns } });
@@ -701,10 +712,7 @@ async function deleteGlobalUser(chatId, index, msgId) {
             
             bot.deleteMessage(chatId, msgId);
             bot.sendMessage(chatId, `🗑 **Deleted:** ${u.email}`);
-            
-            // Remove from session list
             session.users.splice(index, 1);
-            // Refresh list (optional, but good)
         } catch(e) { bot.sendMessage(chatId, "❌ Delete Failed"); }
     }
 }
@@ -719,7 +727,6 @@ async function renewGlobalUser(chatId, index, plan) {
     const result = await findUserInPanelGlobal(server, u.email);
     if(result && result.found) {
         try {
-            // Reset Traffic
             try { await axiosInstance.post(`${server.url}/panel/api/inbounds/resetClientTraffic/${result.inbound.id}/${u.email}`, {}, { headers: { 'Cookie': result.cookies } }); } catch(e) {}
             
             const inbound = result.inbound;
@@ -1057,6 +1064,87 @@ async function deleteResellerUser(chatId, resIdxStr, userIdxStr, isAdmin = false
 }
 
 async function login(server) { try { const res = await axiosInstance.post(`${server.url}/login`, { username: server.username, password: server.password }); return res.headers['set-cookie']; } catch (e) { return null; } }
+
+// --- UPDATED LINK GENERATOR (AUTO PBK INJECTION) ---
+function generateLink(type, inbound, client, ip, remark) {
+    const port = inbound.port;
+    const stream = JSON.parse(inbound.streamSettings);
+    const net = stream.network; 
+    const sec = stream.security || "none"; 
+
+    let path = "";
+    let host = "";
+    let sni = "";
+    let fp = "";
+    let pbk = "";
+    let sid = "";
+    let typeHeader = "none"; 
+
+    if (net === 'ws') {
+        path = stream.wsSettings?.path || "/";
+        host = stream.wsSettings?.headers?.Host || "";
+    } else if (net === 'grpc') {
+        path = stream.grpcSettings?.serviceName || "";
+    } else if (net === 'tcp') {
+        if (stream.tcpSettings && stream.tcpSettings.header && stream.tcpSettings.header.type === 'http') {
+            typeHeader = 'http';
+            path = stream.tcpSettings.header.request?.path?.[0] || "/";
+            host = stream.tcpSettings.header.request?.headers?.Host?.[0] || "";
+        }
+    }
+
+    if (sec === 'tls') {
+        sni = stream.tlsSettings?.serverNames?.[0] || host || "";
+        fp = stream.tlsSettings?.fingerprint || "chrome"; 
+    } else if (sec === 'reality') {
+        sni = stream.realitySettings?.serverNames?.[0] || "";
+        fp = stream.realitySettings?.fingerprint || "chrome";
+        pbk = stream.realitySettings?.publicKey || "";
+        sid = stream.realitySettings?.shortIds?.[0] || "";
+        
+        // --- AUTO INJECT PBK FROM CONFIG IF MISSING ---
+        if (!pbk) {
+            try {
+                const cfg = loadConfig();
+                if (cfg.realityKey && cfg.realityKey.length > 5) {
+                    pbk = cfg.realityKey;
+                }
+            } catch(e) {}
+        }
+    }
+
+    if (type === 'vless') {
+        let link = `vless://${client.id}@${ip}:${port}?type=${net}&encryption=none`;
+        if (path) link += `&path=${encodeURIComponent(path)}`;
+        if (host) link += `&host=${encodeURIComponent(host)}`;
+        if (typeHeader !== 'none') link += `&headerType=${typeHeader}`;
+        if (net === 'grpc') link += `&serviceName=${encodeURIComponent(path)}`;
+        
+        if (sec === 'tls') link += `&security=tls&sni=${sni}&fp=${fp}`;
+        else if (sec === 'reality') link += `&security=reality&sni=${sni}&fp=${fp}&pbk=${pbk}&sid=${sid}`;
+        else link += `&security=none`;
+        
+        return `${link}#${encodeURIComponent(remark)}`;
+    }
+
+    if (type === 'vmess') {
+        const vmessConfig = {
+            v: "2", ps: remark, add: ip, port: port, id: client.id, aid: "0", scy: "auto",
+            net: net, type: typeHeader, host: host, path: path,
+            tls: (sec === 'tls' || sec === 'reality') ? "tls" : "",
+            sni: sni, fp: fp
+        };
+        return "vmess://" + Buffer.from(JSON.stringify(vmessConfig)).toString('base64');
+    }
+
+    if (type === 'ss') {
+        const settings = JSON.parse(inbound.settings);
+        const creds = Buffer.from(`${settings.method}:${client.password}`).toString('base64');
+        return `ss://${creds}@${ip}:${port}#${encodeURIComponent(remark)}`;
+    }
+    return "Link Error";
+}
+
 async function generateResellerKey(chatId, srv, plan, protocol, resIdx, customName) {
     const uuid = uuidv4(); const cookies = await login(srv); if (!cookies) return bot.sendMessage(chatId, "❌ Error");
     let inboundId = protocol==='vmess'?srv.vmessId:(protocol==='ss'?srv.ssId:srv.vlessId);
@@ -1089,13 +1177,6 @@ async function generateAndSendKey(chatId, srv, plan, protocol, isTrial) {
         bot.sendMessage(chatId, `✅ **Key Generated!**\n${link}`, {parse_mode:'Markdown'});
     } catch(e) { bot.sendMessage(chatId, "❌ Error"); }
 }
-function generateLink(type, inbound, client, ip, remark) {
-    const port = inbound.port; const stream = JSON.parse(inbound.streamSettings); const net = stream.network; const sec = stream.security; const path = (net === 'ws') ? (stream.wsSettings?.path || '/') : (stream.grpcSettings?.serviceName || '');
-    if (type === 'vless') { let sni = sec==='reality'?stream.realitySettings?.serverNames?.[0]:(sec==='tls'?stream.tlsSettings?.serverNames?.[0]:""); let pbk = stream.realitySettings?.publicKey||""; let fp = stream.realitySettings?.fingerprint||""; return `vless://${client.id}@${ip}:${port}?type=${net}&security=${sec}&path=${path}&sni=${sni}&fp=${fp}&pbk=${pbk}#${encodeURIComponent(remark)}`; }
-    if (type === 'vmess') { const config = { v: "2", ps: remark, add: ip, port: port, id: client.id, aid: "0", scy: "auto", net: net, type: "none", host: "", path: path, tls: sec, sni: sec==='tls'?stream.tlsSettings?.serverNames?.[0]:"" }; return "vmess://" + Buffer.from(JSON.stringify(config)).toString('base64'); }
-    if (type === 'ss') { const creds = Buffer.from(`${JSON.parse(inbound.settings).method}:${client.password}`).toString('base64'); return `ss://${creds}@${ip}:${port}#${encodeURIComponent(remark)}`; }
-    return "Link Error";
-}
 function handleAdminResellerList(chatId) {
     const config = loadConfig();
     const btns = config.resellers.map((r, i) => [{ text: `👤 ${r.username} (💰 ${r.balance})`, callback_data: `admviewres_${i}` }]);
@@ -1124,16 +1205,19 @@ async function handleAdminResellerUserList(chatId, resIdx, page, msgIdToEdit = n
 EOF
 
 # 4. Install & Run
+echo -e "${YELLOW}[INFO] Cleaning Port 3000...${NC}"
+fuser -k 3000/tcp > /dev/null 2>&1
+
 echo -e "${YELLOW}[INFO] Installing Dependencies...${NC}"
 npm install
 npm install -g pm2
 
 echo -e "${YELLOW}[INFO] Starting System...${NC}"
-pm2 delete 3xbot 2>/dev/null
+pm2 delete 3xbot > /dev/null 2>&1
 pm2 start index.js --name "3xbot"
 pm2 save
 pm2 startup
 
 IP=$(curl -s ifconfig.me)
-echo -e "${GREEN}✅ UPDATE COMPLETE! (All Server Manager Added)${NC}"
+echo -e "${GREEN}✅ UPDATE COMPLETE! (Reality PBK Fix Applied)${NC}"
 echo -e "${GREEN}Panel: http://$IP:3000${NC}"
