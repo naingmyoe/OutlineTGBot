@@ -1,10 +1,10 @@
 #!/bin/bash
 
-# 3xbot Ultimate Installer (v9.9.5 - Final Fix)
+# 3xbot Ultimate Installer (v9.9.8 - PBK Fix)
 # Features:
-# 1. All Server Keys Manager (Global User List).
-# 2. Universal Link Generator (Supports TLS, Reality, TCP/HTTP, WS, gRPC automatically).
-# 3. Auto-detects security settings from panel.
+# 1. All Server Keys Manager.
+# 2. Universal Link Generator.
+# 3. FIXED: Auto-injects Reality Public Key from Web Panel Config.
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -13,7 +13,7 @@ CYAN='\033[0;36m'
 NC='\033[0m'
 
 echo -e "${CYAN}=====================================================${NC}"
-echo -e "${CYAN}    3xbot Installer v9.9.5 (Universal Link Fix)      ${NC}"
+echo -e "${CYAN}    3xbot Installer v9.9.8 (PBK Fix Version)         ${NC}"
 echo -e "${CYAN}=====================================================${NC}"
 
 # Check Root
@@ -37,7 +37,7 @@ cd "$PROJECT_DIR"
 cat > package.json <<EOF
 {
   "name": "3xbot-manager",
-  "version": "9.9.5",
+  "version": "9.9.8",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
@@ -55,7 +55,7 @@ cat > package.json <<EOF
 }
 EOF
 
-# 2. Config Template (Only if not exists - Keeps your data safe)
+# 2. Config Template (Preserves existing data)
 if [ ! -f config.json ]; then
     cat << 'EOF' > config.json
 {
@@ -81,6 +81,7 @@ if [ ! -f config.json ]; then
     "vmess": true,
     "ss": true
   },
+  "realityKey": "",
   "allUsers": [],
   "trialUsers": [],
   "servers": [],
@@ -92,7 +93,7 @@ if [ ! -f config.json ]; then
 EOF
 fi
 
-# 3. Create index.js (UPDATED: With New Link Generator)
+# 3. Create index.js (UPDATED: With PBK Injection Logic)
 cat > index.js <<'EOF'
 const express = require('express');
 const bodyParser = require('body-parser');
@@ -199,7 +200,7 @@ async function syncResellerUsers(resIdx) {
                         }
                         validUsers.push(u);
                     } else { 
-                        console.log(`[SYNC] Removing ghost user: ${u.email}`); 
+                        // console.log(`[SYNC] Removing ghost user: ${u.email}`); 
                         hasChanges = true; 
                     }
                 });
@@ -239,7 +240,15 @@ app.post('/api/config', (req, res) => {
     saveConfig(req.body);
     res.json({ success: true });
 });
-app.listen(PORT, () => console.log(`✅ Web Panel running on Port ${PORT}`));
+
+// Port handling for Web Panel
+const server = app.listen(PORT, () => console.log(`✅ Web Panel running on Port ${PORT}`));
+server.on('error', (e) => {
+    if (e.code === 'EADDRINUSE') {
+        console.log('⚠️ Port 3000 busy, retrying...');
+        setTimeout(() => { server.close(); server.listen(PORT); }, 1000);
+    }
+});
 
 // --- BOT LOGIC ---
 let config = loadConfig();
@@ -1044,7 +1053,7 @@ async function deleteResellerUser(chatId, resIdxStr, userIdxStr, isAdmin = false
 
 async function login(server) { try { const res = await axiosInstance.post(`${server.url}/login`, { username: server.username, password: server.password }); return res.headers['set-cookie']; } catch (e) { return null; } }
 
-// --- UPDATED LINK GENERATOR (Universal Support) ---
+// --- UPDATED LINK GENERATOR (AUTO PBK INJECTION) ---
 function generateLink(type, inbound, client, ip, remark) {
     const port = inbound.port;
     const stream = JSON.parse(inbound.streamSettings);
@@ -1080,6 +1089,16 @@ function generateLink(type, inbound, client, ip, remark) {
         fp = stream.realitySettings?.fingerprint || "chrome";
         pbk = stream.realitySettings?.publicKey || "";
         sid = stream.realitySettings?.shortIds?.[0] || "";
+        
+        // --- AUTO INJECT PBK FROM CONFIG IF MISSING ---
+        if (!pbk) {
+            try {
+                const cfg = loadConfig();
+                if (cfg.realityKey && cfg.realityKey.length > 5) {
+                    pbk = cfg.realityKey;
+                }
+            } catch(e) {}
+        }
     }
 
     if (type === 'vless') {
@@ -1174,16 +1193,19 @@ async function handleAdminResellerUserList(chatId, resIdx, page, msgIdToEdit = n
 EOF
 
 # 4. Install & Run
+echo -e "${YELLOW}[INFO] Cleaning Port 3000...${NC}"
+fuser -k 3000/tcp > /dev/null 2>&1
+
 echo -e "${YELLOW}[INFO] Installing Dependencies...${NC}"
 npm install
 npm install -g pm2
 
 echo -e "${YELLOW}[INFO] Starting System...${NC}"
-pm2 delete 3xbot 2>/dev/null
+pm2 delete 3xbot > /dev/null 2>&1
 pm2 start index.js --name "3xbot"
 pm2 save
 pm2 startup
 
 IP=$(curl -s ifconfig.me)
-echo -e "${GREEN}✅ UPDATE COMPLETE! (Universal Link Fix)${NC}"
+echo -e "${GREEN}✅ UPDATE COMPLETE! (Reality PBK Fix Applied)${NC}"
 echo -e "${GREEN}Panel: http://$IP:3000${NC}"
